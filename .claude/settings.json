@@ -1,0 +1,23 @@
+{
+  "plansDirectory": ".claude/plans",
+  "permissions": {
+    "allow": [
+      "Bash(mise run build)",
+      "Bash(mise run test)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/post_tool_use_test.sh",
+            "statusMessage": "テスト実行中..."
+          }
+        ]
+      }
+    ]
+  }
+}
