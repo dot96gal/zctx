@@ -9,8 +9,8 @@ pub const CancelError = error{
 };
 
 // モジュールレベル変数。Context.done() が参照する。
-var NEVER_FIRED_SIGNAL: Signal = .{};
-var ALWAYS_FIRED_SIGNAL: Signal = .{ .fired = .init(true) };
+var neverFiredSignal: Signal = .{};
+var alwaysFiredSignal: Signal = .{ .fired = .init(true) };
 
 /// タグ付き共用体によるContext。
 /// フィールド名とメソッド名の衝突を避けるため、deadline/value の派生コンテキストは
@@ -25,8 +25,8 @@ pub const Context = union(enum) {
 
     pub fn done(ctx: Context) *Signal {
         return switch (ctx) {
-            .background, .todo => &NEVER_FIRED_SIGNAL,
-            .cancelled => &ALWAYS_FIRED_SIGNAL,
+            .background, .todo => &neverFiredSignal,
+            .cancelled => &alwaysFiredSignal,
             .cancel => |c| &c.state.signal,
             .deadlineCtx => |d| &d.state.signal,
             .valueCtx => |v| v.parent.done(),
@@ -134,7 +134,7 @@ const CancelState = struct {
     cancelErr: ?CancelError,
     mutex: std.Thread.Mutex,
     allocator: std.mem.Allocator,
-    children: std.ArrayList(CancelChild),
+    children: std.ArrayListUnmanaged(CancelChild),
 
     const CancelChild = union(enum) {
         cancel: *CancelCtx,
