@@ -32,10 +32,10 @@ zctx.todo              // 未実装のプレースホルダー
 zctx.cancelledContext  // 最初からキャンセル済み
 
 // 派生コンテキスト（返り値は OwnedContext）
-zctx.withCancel(alloc, parent)                    // !OwnedContext
-zctx.withTimeout(alloc, parent, timeoutNs)        // !OwnedContext
-zctx.withDeadline(alloc, parent, deadlineNs)      // !OwnedContext
-zctx.withTypedValue(Key, alloc, parent, value)    // !OwnedContext
+zctx.withCancel(alloc, parent)                    // error{OutOfMemory}!OwnedContext
+zctx.withTimeout(alloc, parent, timeoutNs)        // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
+zctx.withDeadline(alloc, parent, deadlineNs)      // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
+zctx.withTypedValue(Key, alloc, parent, value)    // error{OutOfMemory}!OwnedContext
 
 // OwnedContext のメソッド
 result.context   // Context 値

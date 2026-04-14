@@ -249,7 +249,7 @@ fn registerToState(state: *CancelState, child: CancelState.CancelChild) !void {
 // --- コンストラクタ ---
 
 /// 手動キャンセル可能なコンテキストを作成する。
-pub fn withCancel(allocator: std.mem.Allocator, parent: Context) !OwnedContext {
+pub fn withCancel(allocator: std.mem.Allocator, parent: Context) error{OutOfMemory}!OwnedContext {
     const ctx = try allocator.create(CancelCtx);
     errdefer allocator.destroy(ctx);
     ctx.* = .{
@@ -280,7 +280,7 @@ pub fn withDeadline(
     allocator: std.mem.Allocator,
     parent: Context,
     deadlineNs: i128,
-) !OwnedContext {
+) (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext {
     const ctx = try allocator.create(DeadlineCtx);
     errdefer allocator.destroy(ctx);
     ctx.* = .{
@@ -314,7 +314,7 @@ pub fn withTimeout(
     allocator: std.mem.Allocator,
     parent: Context,
     timeoutNs: u64,
-) !OwnedContext {
+) (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext {
     const dl = std.time.nanoTimestamp() + @as(i128, timeoutNs);
     return withDeadline(allocator, parent, dl);
 }
@@ -325,7 +325,7 @@ pub fn withTypedValue(
     allocator: std.mem.Allocator,
     parent: Context,
     val: Key.Value,
-) !OwnedContext {
+) error{OutOfMemory}!OwnedContext {
     const valPtr = try allocator.create(Key.Value);
     errdefer allocator.destroy(valPtr);
     valPtr.* = val;
