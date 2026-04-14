@@ -9,6 +9,9 @@ pub const CancelError = error{
 };
 
 // モジュールレベル変数。Context.done() が参照する。
+// neverFiredSignal は background / todo の done() が返す共有シグナル。
+// 外部から fire されることはないため、waitAny() に background.done() / todo.done() を
+// 渡した場合、対応する WaiterNode はリークする。これらを waitAny() に渡さないこと。
 var neverFiredSignal: Signal = .{};
 var alwaysFiredSignal: Signal = .{ .fired = .init(true) };
 
@@ -166,9 +169,13 @@ const CancelState = struct {
             return;
         }
         self.cancelErr = reason;
-        for (self.children.items) |child| child.propagate(reason);
-        self.children.deinit(self.allocator);
+        // children をスナップショットとして取り出し、ロック解放後に propagate する。
+        // ロック保持中に子の cancelFn を呼ぶとロック保持時間が長くなるため。
+        var children = self.children;
+        self.children = .{};
         self.mutex.unlock();
+        for (children.items) |child| child.propagate(reason);
+        children.deinit(self.allocator);
         self.signal.fire();
     }
 };

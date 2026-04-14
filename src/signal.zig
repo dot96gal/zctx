@@ -92,35 +92,29 @@ const WaiterNode = struct {
 pub fn waitAny(signals: anytype) std.meta.FieldEnum(@TypeOf(signals)) {
     const T = @TypeOf(signals);
     const fields = std.meta.fields(T);
+
     var ptrs: [fields.len]*Signal = undefined;
     inline for (fields, 0..) |f, i| ptrs[i] = @field(signals, f.name);
-    const idx = waitAnySlice(&ptrs);
-    return @enumFromInt(idx);
-}
 
-/// waitAny の内部実装。
-fn waitAnySlice(signals: []const *Signal) usize {
-    // WaitTarget（1個）と WaiterNode（signals.len 個）をスタック確保
+    // WaitTarget（1個）と WaiterNode（fields.len 個）をスタック確保。
+    // fields.len はコンパイル時確定なので固定長配列で安全に確保できる。
     var target = WaitTarget{};
-    // コンパイル時にスライス長が不明なため、最大サイズで配列確保
-    // 実際の利用では anytype struct のフィールド数がコンパイル時に決まる
-    var nodes_buf: [64]WaiterNode = undefined;
-    const nodes = nodes_buf[0..signals.len];
-    for (0..signals.len) |i| nodes[i] = .{ .target = &target, .index = i };
+    var nodes: [fields.len]WaiterNode = undefined;
+    for (0..fields.len) |i| nodes[i] = .{ .target = &target, .index = i };
 
     // 各シグナルに mutex 保持下で登録（発火済みなら登録済み分をクリーンアップして返却）
     var registered: usize = 0;
-    for (signals, 0..) |sig, i| {
+    for (ptrs, 0..) |sig, i| {
         sig.mutex.lock();
         if (sig.isFired()) {
             sig.mutex.unlock();
             // 登録済みの nodes[0..registered] をリストから除去してから返す
-            for (signals[0..registered], 0..) |prev_sig, j| {
+            for (ptrs[0..registered], 0..) |prev_sig, j| {
                 prev_sig.mutex.lock();
                 removeNode(prev_sig, &nodes[j]);
                 prev_sig.mutex.unlock();
             }
-            return i;
+            return @enumFromInt(i);
         }
         // nodes[i] を sig.waiters の先頭に挿入
         nodes[i].next = sig.waiters;
@@ -133,12 +127,12 @@ fn waitAnySlice(signals: []const *Signal) usize {
     const firedIdx = target.waitForAny();
 
     // 全シグナルから WaiterNode を除去（mutex 保護）
-    for (signals, 0..) |sig, i| {
+    for (ptrs, 0..) |sig, i| {
         sig.mutex.lock();
         removeNode(sig, &nodes[i]);
         sig.mutex.unlock();
     }
-    return firedIdx;
+    return @enumFromInt(firedIdx);
 }
 
 /// Signal の waiters リストから指定ノードを除去する（mutex 保持下で呼ぶこと）。
