@@ -1,43 +1,41 @@
-// 現在は example/src → src/ のシンボリックリンク経由でライブラリを参照している。
-// TODO: Zig が macOS 26.x SDK + -M フラグに対応した際は、以下のように変更する:
-//   1. example/src シンボリックリンクを削除する
-//   2. @import("src/root.zig") → @import("zctx") に変更する
-//   3. mise.toml のコンパイルコマンドで -Mzctx=src/root.zig を指定する
-//      または build.zig にモジュール登録（b.addModule("zctx", ...)）を使うこと。
-const zctx = @import("src/root.zig");
+const zctx = @import("zctx");
 
 const std = @import("std");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+const ThreadArgs = struct {
+    owned: zctx.OwnedContext,
+    io: std.Io,
+};
+
+fn cancelAfterDelay(thread_args: ThreadArgs) void {
+    std.Io.sleep(thread_args.io, .{ .nanoseconds = 50 * std.time.ns_per_ms }, .awake) catch {};
+    thread_args.owned.cancel(thread_args.io);
+}
+
+pub fn main(env: std.process.Init) !void {
+    const io = env.io;
+    const allocator = env.gpa;
 
     std.debug.print("=== wait_any: 複数のシグナルのいずれかを待機する ===\n", .{});
 
     // 2つのキャンセル可能なコンテキストを作成する
-    const ctx_a = try zctx.withCancel(allocator, zctx.background);
-    defer ctx_a.deinit();
+    const ctx_a = try zctx.withCancel(io, zctx.background, allocator);
+    defer ctx_a.deinit(io);
 
-    const ctx_b = try zctx.withCancel(allocator, zctx.background);
-    defer ctx_b.deinit();
+    const ctx_b = try zctx.withCancel(io, zctx.background, allocator);
+    defer ctx_b.deinit(io);
 
     // 別スレッドで ctx_b をキャンセルする
-    const thread = try std.Thread.spawn(.{}, struct {
-        fn run(owned: zctx.OwnedContext) void {
-            std.Thread.sleep(50 * std.time.ns_per_ms);
-            owned.cancel();
-        }
-    }.run, .{ctx_b});
+    const thread = try std.Thread.spawn(.{}, cancelAfterDelay, .{ThreadArgs{ .owned = ctx_b, .io = io }});
     thread.detach();
 
     // ctx_a または ctx_b のいずれかがキャンセルされるまで待機する
-    const which = zctx.waitAny(.{
+    const which = zctx.waitAny(io, .{
         .a = ctx_a.context.done(),
         .b = ctx_b.context.done(),
     });
 
     std.debug.print("fired: {s}\n", .{@tagName(which)});
-    std.debug.print("ctx_a err: {?}\n", .{ctx_a.context.err()});
-    std.debug.print("ctx_b err: {?}\n", .{ctx_b.context.err()});
+    std.debug.print("ctx_a err: {?}\n", .{ctx_a.context.err(io)});
+    std.debug.print("ctx_b err: {?}\n", .{ctx_b.context.err(io)});
 }

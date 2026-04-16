@@ -13,11 +13,19 @@
         "hooks": [
           {
             "type": "command",
+            "command": "bash .claude/hooks/post_tool_use_fmt_check.sh",
+            "statusMessage": "フォーマットチェック中..."
+          },
+          {
+            "type": "command",
             "command": "bash .claude/hooks/post_tool_use_test.sh",
             "statusMessage": "テスト実行中..."
           }
         ]
       }
     ]
+  },
+  "enabledPlugins": {
+    "zls-plugin@local": true
   }
 }

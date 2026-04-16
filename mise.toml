@@ -1,58 +1,40 @@
 [tools]
-zig = "0.15.2"
+zig = "0.16.0"
+zls = "0.16.0"
+
+[tasks.fmt]
+description = "format"
+run = "zig fmt src/"
+
+[tasks."fmt-check"]
+description = "format check"
+run = "zig fmt --check src/"
 
 [tasks.build]
 description = "build (compile check)"
-# zig build は Zig 0.15.2 + macOS SDK 26.4 の互換性問題でリンクに失敗するため、
-# zig build-lib で直接コンパイルチェックを行う。-target aarch64-macos を指定することで回避できる。
-run = "zig build-lib src/root.zig -target aarch64-macos -fno-emit-bin"
+run = "zig build --summary all"
 
 [tasks.test]
 description = "test"
-# zig build test は Zig 0.15.2 + macOS SDK 26.4 の互換性問題でリンクに失敗するため、
-# zig test で直接実行する。-target aarch64-macos を指定することで回避できる。
-run = "zig test src/context.zig -target aarch64-macos"
+run = "zig build test --summary all"
 
-# example タスク
-# example/src → src/ のシンボリックリンクを利用して @import("src/root.zig") を解決する。
-# zig run / zig build-exe -M フラグは Zig 0.15.2 + macOS SDK 26.4 の互換性問題で
-# lld を使うため、zig build-exe <file> -target aarch64-macos の形式を維持する。
-# TODO: Zig が macOS 26.x SDK + -M フラグに対応した際は:
-#   1. example/src シンボリックリンクを削除する
-#   2. 各 .zig ファイルのインポートを @import("zctx") に変更する
-#   3. zig build-exe の代わりに zig build を使うか -Mzctx=src/root.zig を追加する
-
+# example タスク（build.zig 経由で zctx モジュールを参照）
 [tasks."example:basic"]
 description = "run example/basic.zig"
-run = """
-zig build-exe example/basic.zig -target aarch64-macos -femit-bin=$TMPDIR/zctx_example
-$TMPDIR/zctx_example
-"""
+run = "zig build run-example-basic --summary all"
 
 [tasks."example:timeout"]
 description = "run example/timeout.zig"
-run = """
-zig build-exe example/timeout.zig -target aarch64-macos -femit-bin=$TMPDIR/zctx_example
-$TMPDIR/zctx_example
-"""
+run = "zig build run-example-timeout --summary all"
 
 [tasks."example:propagation"]
 description = "run example/propagation.zig"
-run = """
-zig build-exe example/propagation.zig -target aarch64-macos -femit-bin=$TMPDIR/zctx_example
-$TMPDIR/zctx_example
-"""
+run = "zig build run-example-propagation --summary all"
 
 [tasks."example:value"]
 description = "run example/value.zig"
-run = """
-zig build-exe example/value.zig -target aarch64-macos -femit-bin=$TMPDIR/zctx_example
-$TMPDIR/zctx_example
-"""
+run = "zig build run-example-value --summary all"
 
 [tasks."example:wait_any"]
 description = "run example/wait_any.zig"
-run = """
-zig build-exe example/wait_any.zig -target aarch64-macos -femit-bin=$TMPDIR/zctx_example
-$TMPDIR/zctx_example
-"""
+run = "zig build run-example-wait_any --summary all"
