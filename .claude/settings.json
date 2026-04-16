@@ -2,8 +2,7 @@
   "plansDirectory": ".claude/plans",
   "permissions": {
     "allow": [
-      "Bash(mise run build)",
-      "Bash(mise run test)"
+      "Bash(mise run *)"
     ]
   },
   "hooks": {
