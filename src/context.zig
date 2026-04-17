@@ -26,6 +26,7 @@ pub const Context = union(enum) {
     deadlineCtx: *DeadlineCtx,
     valueCtx: *ValueCtx,
 
+    /// キャンセルシグナルを返す。background / todo は永遠に発火しない。
     pub fn done(ctx: Context) *Signal {
         return switch (ctx) {
             .background, .todo => &neverFiredSignal,
@@ -36,6 +37,7 @@ pub const Context = union(enum) {
         };
     }
 
+    /// キャンセル理由を返す。未キャンセルなら null。
     pub fn err(ctx: Context, io: std.Io) ?CancelError {
         return switch (ctx) {
             .background, .todo => null,
@@ -54,6 +56,7 @@ pub const Context = union(enum) {
         };
     }
 
+    /// デッドライン（std.Io.Clock.Timestamp 基準ナノ秒）を返す。なければ null。
     pub fn deadline(ctx: Context) ?i96 {
         return switch (ctx) {
             .background, .todo => null,

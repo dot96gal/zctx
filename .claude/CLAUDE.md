@@ -18,7 +18,8 @@ mise タスクでコマンドを実行する。
 
 - `mise run build`: ビルド（`zig build --summary all`）
 - `mise run test`: テスト（`zig build test --summary all`）
-- `mise run run`: 実行（`zig build run --summary all`）
+- `mise run build-docs`: API ドキュメント生成（`zig build docs --summary all`、出力先: `zig-out/docs/`）
+- `mise run serve-docs`: ドキュメントをローカルサーバーで開く（CORS制約のためファイル直接開示不可）
 
 ## 依存関係
 

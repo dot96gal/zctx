@@ -192,7 +192,10 @@ mise install
 
 ```sh
 mise run build   # コンパイルチェック（zig build --summary all）
-mise run test    # テスト実行（33件）
+mise run test    # テスト実行
+
+mise run build-docs  # API ドキュメント生成（zig-out/docs/ に出力）
+mise run serve-docs  # ドキュメントをローカルサーバーで開く
 
 mise run example:basic       # withCancel の基本例
 mise run example:timeout     # withTimeout の例
@@ -253,10 +256,9 @@ Go の `chan struct{}` を閉じる操作に相当する。リスナー（`Waite
 
 ### テスト
 
-テストはソースファイル内にインラインで記述している（`src/signal.zig` に12件、`src/context.zig`
-に21件、計33件）。`testing.allocator` でメモリリークを自動検出する。
+テストはソースファイル内にインラインで記述している（`src/signal.zig`、`src/context.zig`）。
+`testing.allocator` でメモリリークを自動検出する。
 
 ```sh
 mise run test
-# All 33 tests passed.
 ```

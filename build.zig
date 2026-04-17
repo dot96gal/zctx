@@ -10,6 +10,22 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    const lib = b.addLibrary(.{
+        .name = "zctx",
+        .root_module = mod,
+        .linkage = .static,
+    });
+
+    const docs = lib.getEmittedDocs();
+    const install_docs = b.addInstallDirectory(.{
+        .source_dir = docs,
+        .install_dir = .prefix,
+        .install_subdir = "docs",
+    });
+
+    const docs_step = b.step("docs", "Generate API documentation");
+    docs_step.dependOn(&install_docs.step);
+
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
