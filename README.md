@@ -29,7 +29,7 @@ const zctx = @import("zctx");
 // ルートコンテキスト（アロケータ不要）
 zctx.background        // キャンセルされないルート
 zctx.todo              // 未実装のプレースホルダー
-zctx.cancelledContext  // 最初からキャンセル済み
+zctx.cancelled  // 最初からキャンセル済み
 
 // 派生コンテキスト（返り値は OwnedContext）
 zctx.withCancel(io, parent, alloc)                    // error{OutOfMemory}!OwnedContext
@@ -44,7 +44,7 @@ result.deinit(io)   // メモリ解放（未キャンセルなら先にキャン
 
 // Context のメソッド
 ctx.done()               // *Signal  — isFired() / wait(io) で待機できる
-ctx.err(io)              // ?CancelError  — null / error.Canceled / error.DeadlineExceeded
+ctx.err(io)              // ?ContextError  — null / error.Canceled / error.DeadlineExceeded
 ctx.deadline()           // ?i96  — std.Io.Clock.Timestamp 基準のデッドライン
 ctx.typedValue(Key)      // ?Key.Value  — 型安全な値の取り出し
 

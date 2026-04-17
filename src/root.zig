@@ -7,8 +7,8 @@ pub const waitAny = @import("signal.zig").waitAny;
 
 /// タグ付き共用体によるコンテキスト型。
 pub const Context = @import("context.zig").Context;
-/// キャンセル理由を表すエラー集合。
-pub const CancelError = @import("context.zig").CancelError;
+/// コンテキストの終了理由を表すエラー集合。
+pub const ContextError = @import("context.zig").ContextError;
 /// withCancel / withDeadline / withTimeout / withTypedValue の返り値型。
 pub const OwnedContext = @import("context.zig").OwnedContext;
 /// comptime 型安全キーを生成する関数。
@@ -19,7 +19,7 @@ pub const background = @import("context.zig").background;
 /// プレースホルダーコンテキスト。background と同じ振る舞い。
 pub const todo = @import("context.zig").todo;
 /// 最初からキャンセル済みのコンテキスト。
-pub const cancelledContext = @import("context.zig").cancelledContext;
+pub const cancelled = @import("context.zig").cancelled;
 
 /// 手動キャンセル可能なコンテキストを作成する。
 pub const withCancel = @import("context.zig").withCancel;

@@ -2,8 +2,8 @@ const std = @import("std");
 const signal_mod = @import("signal.zig");
 pub const Signal = signal_mod.Signal;
 
-/// キャンセル理由。
-pub const CancelError = error{
+/// コンテキストの終了理由。
+pub const ContextError = error{
     Canceled,
     DeadlineExceeded,
 };
@@ -37,11 +37,11 @@ pub const Context = union(enum) {
         };
     }
 
-    /// キャンセル理由を返す。未キャンセルなら null。
-    pub fn err(ctx: Context, io: std.Io) ?CancelError {
+    /// コンテキストの終了理由を返す。未キャンセルなら null。
+    pub fn err(ctx: Context, io: std.Io) ?ContextError {
         return switch (ctx) {
             .background, .todo => null,
-            .cancelled => CancelError.Canceled,
+            .cancelled => ContextError.Canceled,
             .cancel => |c| blk: {
                 c.state.mutex.lockUncancelable(io);
                 defer c.state.mutex.unlock(io);
@@ -117,7 +117,7 @@ pub const background: Context = .background;
 pub const todo: Context = .todo;
 
 /// 最初からキャンセル済みのコンテキスト（アロケータ不要）。
-pub const cancelledContext: Context = .cancelled;
+pub const cancelled: Context = .cancelled;
 
 /// comptime 型安全キー。
 /// key は型ごとにユニークなポインタ。
@@ -137,7 +137,7 @@ pub fn TypedKey(comptime T: type) type {
 /// CancelCtx / DeadlineCtx 共通の状態とキャンセルロジック。
 const CancelState = struct {
     signal: Signal,
-    cancelErr: ?CancelError,
+    cancelErr: ?ContextError,
     mutex: std.Io.Mutex,
     allocator: std.mem.Allocator,
     children: std.ArrayListUnmanaged(CancelChild),
@@ -146,7 +146,7 @@ const CancelState = struct {
         cancel: *CancelCtx,
         deadlineCtx: *DeadlineCtx,
 
-        fn propagate(child: CancelChild, io: std.Io, reason: CancelError) void {
+        fn propagate(child: CancelChild, io: std.Io, reason: ContextError) void {
             switch (child) {
                 .cancel => |c| c.state.cancelFn(io, reason),
                 .deadlineCtx => |d| d.state.cancelFn(io, reason),
@@ -165,7 +165,7 @@ const CancelState = struct {
     }
 
     /// シグナルのみ発火。メモリは解放しない。idempotent。
-    fn cancelFn(self: *CancelState, io: std.Io, reason: CancelError) void {
+    fn cancelFn(self: *CancelState, io: std.Io, reason: ContextError) void {
         self.mutex.lockUncancelable(io);
         if (self.cancelErr != null) {
             self.mutex.unlock(io);
@@ -357,25 +357,25 @@ pub fn withTypedValue(
 
 test "background: doneにならない" {
     const io = std.testing.io;
-    try std.testing.expectEqual(@as(?CancelError, null), background.err(io));
+    try std.testing.expectEqual(@as(?ContextError, null), background.err(io));
 }
 
 test "todo: doneにならない" {
     const io = std.testing.io;
-    try std.testing.expectEqual(@as(?CancelError, null), todo.err(io));
+    try std.testing.expectEqual(@as(?ContextError, null), todo.err(io));
 }
 
-test "cancelledContext: 即座にdone" {
+test "cancelled: 即座にdone" {
     const io = std.testing.io;
-    try std.testing.expectEqual(CancelError.Canceled, cancelledContext.err(io).?);
-    try std.testing.expect(cancelledContext.done().isFired());
+    try std.testing.expectEqual(ContextError.Canceled, cancelled.err(io).?);
+    try std.testing.expect(cancelled.done().isFired());
 }
 
 test "withCancel: 初期状態はdoneでない" {
     const io = std.testing.io;
     const r = try withCancel(io, background, std.testing.allocator);
     defer r.deinit(io);
-    try std.testing.expectEqual(@as(?CancelError, null), r.context.err(io));
+    try std.testing.expectEqual(@as(?ContextError, null), r.context.err(io));
 }
 
 test "withCancel: cancel後はdone" {
@@ -383,7 +383,7 @@ test "withCancel: cancel後はdone" {
     const r = try withCancel(io, background, std.testing.allocator);
     defer r.deinit(io);
     r.cancel(io);
-    try std.testing.expectEqual(CancelError.Canceled, r.context.err(io).?);
+    try std.testing.expectEqual(ContextError.Canceled, r.context.err(io).?);
 }
 
 test "withCancel: cancelはidempotent" {
@@ -408,7 +408,7 @@ test "withCancel: 親cancelが子に伝播する" {
     defer child.deinit(io);
 
     parent.cancel(io);
-    try std.testing.expectEqual(CancelError.Canceled, child.context.err(io).?);
+    try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
 }
 
 test "withCancel: 子cancelは親に影響しない" {
@@ -419,7 +419,7 @@ test "withCancel: 子cancelは親に影響しない" {
     defer child.deinit(io);
 
     child.cancel(io);
-    try std.testing.expectEqual(@as(?CancelError, null), parent.context.err(io));
+    try std.testing.expectEqual(@as(?ContextError, null), parent.context.err(io));
 }
 
 test "withCancel: キャンセル済み親から作った子は即座にdone" {
@@ -430,14 +430,14 @@ test "withCancel: キャンセル済み親から作った子は即座にdone" {
 
     const child = try withCancel(io, parent.context, std.testing.allocator);
     defer child.deinit(io);
-    try std.testing.expectEqual(CancelError.Canceled, child.context.err(io).?);
+    try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
 }
 
-test "withCancel: cancelledContextを親にすると即座にdone" {
+test "withCancel: cancelledを親にすると即座にdone" {
     const io = std.testing.io;
-    const child = try withCancel(io, cancelledContext, std.testing.allocator);
+    const child = try withCancel(io, cancelled, std.testing.allocator);
     defer child.deinit(io);
-    try std.testing.expectEqual(CancelError.Canceled, child.context.err(io).?);
+    try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
 }
 
 test "withTimeout: 期限到達でDeadlineExceeded" {
@@ -446,7 +446,7 @@ test "withTimeout: 期限到達でDeadlineExceeded" {
     defer r.deinit(io);
 
     r.context.done().wait(io);
-    try std.testing.expectEqual(CancelError.DeadlineExceeded, r.context.err(io).?);
+    try std.testing.expectEqual(ContextError.DeadlineExceeded, r.context.err(io).?);
 }
 
 test "withTimeout: 期限前にcancel → Canceled" {
@@ -455,7 +455,7 @@ test "withTimeout: 期限前にcancel → Canceled" {
     defer r.deinit(io);
 
     r.cancel(io);
-    try std.testing.expectEqual(CancelError.Canceled, r.context.err(io).?);
+    try std.testing.expectEqual(ContextError.Canceled, r.context.err(io).?);
 }
 
 test "withDeadline: 過去のdeadlineは即座にDeadlineExceeded（fast-path）" {
@@ -463,7 +463,7 @@ test "withDeadline: 過去のdeadlineは即座にDeadlineExceeded（fast-path）
     const past = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
     const r = try withDeadline(io, background, past, std.testing.allocator);
     defer r.deinit(io);
-    try std.testing.expectEqual(CancelError.DeadlineExceeded, r.context.err(io).?);
+    try std.testing.expectEqual(ContextError.DeadlineExceeded, r.context.err(io).?);
     try std.testing.expect(r.context.done().isFired());
 }
 
@@ -476,7 +476,7 @@ test "withDeadline: 親がキャンセル済みのfast-pathはCanceled" {
     const past = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
     const child = try withDeadline(io, parent.context, past, std.testing.allocator);
     defer child.deinit(io);
-    try std.testing.expectEqual(CancelError.Canceled, child.context.err(io).?);
+    try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
 }
 
 test "withTimeout: cancel後にdeinitしてもブロックしない" {
