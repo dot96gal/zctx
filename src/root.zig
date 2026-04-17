@@ -29,3 +29,8 @@ pub const withDeadline = @import("context.zig").withDeadline;
 pub const withTimeout = @import("context.zig").withTimeout;
 /// 型安全な値付きコンテキストを作成する。
 pub const withTypedValue = @import("context.zig").withTypedValue;
+
+test {
+    _ = @import("signal.zig");
+    _ = @import("context.zig");
+}

@@ -37,9 +37,11 @@ pub const Signal = struct {
         });
         const timeout: std.Io.Timeout = .{ .deadline = deadline_ts };
         while (!self.fired.isSet()) {
-            const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-            if (now_ns >= deadline_ts.raw.nanoseconds) return false;
-            self.fired.waitTimeout(io, timeout) catch {};
+            const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+            if (nowNs >= deadline_ts.raw.nanoseconds) return false;
+            self.fired.waitTimeout(io, timeout) catch |err| switch (err) {
+                error.Timeout, error.Canceled => {},
+            };
         }
         return true;
     }
@@ -174,11 +176,11 @@ test "Signal: 別スレッドからのfireでwaitが起きる" {
     const io = std.testing.io;
     var sig = Signal{};
     const thread = try std.Thread.spawn(.{}, struct {
-        fn run(args: struct { s: *Signal, io: std.Io }) void {
-            std.Io.sleep(args.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
-            args.s.fire(args.io);
+        fn run(s: *Signal, tio: std.Io) void {
+            std.Io.sleep(tio, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch |err| std.debug.panic("sleep failed: {}", .{err});
+            s.fire(tio);
         }
-    }.run, .{.{ .s = &sig, .io = io }});
+    }.run, .{ &sig, io });
     sig.wait(io);
     thread.join();
     try std.testing.expect(sig.isFired());
@@ -203,11 +205,11 @@ test "Signal.waitTimeout: 別スレッドのfireで早期リターンしtrueを�
     const io = std.testing.io;
     var sig = Signal{};
     const thread = try std.Thread.spawn(.{}, struct {
-        fn run(args: struct { s: *Signal, io: std.Io }) void {
-            std.Io.sleep(args.io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
-            args.s.fire(args.io);
+        fn run(s: *Signal, tio: std.Io) void {
+            std.Io.sleep(tio, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch |err| std.debug.panic("sleep failed: {}", .{err});
+            s.fire(tio);
         }
-    }.run, .{.{ .s = &sig, .io = io }});
+    }.run, .{ &sig, io });
     const fired = sig.waitTimeout(io, 1 * std.time.ns_per_s);
     thread.join();
     try std.testing.expect(fired);

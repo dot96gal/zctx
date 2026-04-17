@@ -127,8 +127,8 @@ pub fn TypedKey(comptime T: type) type {
         pub const Value = T;
         // var にすることで各 TypedKey(T) instantiation に固有のアドレスを確保する。
         // u0（zero-size）だとリンカが複数の定数を同一アドレスにマージする可能性がある。
-        var _unique: u8 = 0;
-        pub const key: *anyopaque = &_unique;
+        var marker: u8 = 0;
+        pub const key: *anyopaque = &marker;
     };
 }
 
@@ -322,8 +322,8 @@ pub fn withTimeout(
     timeoutNs: u64,
     allocator: std.mem.Allocator,
 ) (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext {
-    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + @as(i96, timeoutNs) }, .clock = .awake };
+    const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + @as(i96, timeoutNs) }, .clock = .awake };
     return withDeadline(io, parent, dl, allocator);
 }
 
@@ -508,15 +508,15 @@ test "withTypedValue: 親チェーンを辿って値を返す" {
 test "withTypedValue: キーが違えばnullを返す" {
     const Key1 = TypedKey(u32);
     const Key2 = TypedKey(u64);
-    const r = try withTypedValue(Key1, background, std.testing.allocator, 42);
+    const r = try withTypedValue(background, Key1, 42, std.testing.allocator);
     defer r.deinit(std.testing.io);
     try std.testing.expectEqual(@as(?u64, null), r.context.typedValue(Key2));
 }
 
 test "Context.deadline: withDeadlineで設定した値を返す" {
     const io = std.testing.io;
-    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + 10 * std.time.ns_per_s }, .clock = .awake };
+    const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + 10 * std.time.ns_per_s }, .clock = .awake };
     const r = try withDeadline(io, background, dl, std.testing.allocator);
     defer r.deinit(io);
     try std.testing.expectEqual(@as(?std.Io.Clock.Timestamp, dl), r.context.deadline());
