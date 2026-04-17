@@ -13,11 +13,11 @@ pub fn main(env: std.process.Init) !void {
     std.debug.print("=== value: TypedKey によるコンテキスト値の受け渡し ===\n", .{});
 
     // リクエスト ID をコンテキストに格納する
-    const ctx1 = try zctx.withTypedValue(RequestIdKey, allocator, zctx.background, 42);
+    const ctx1 = try zctx.withTypedValue(zctx.background, RequestIdKey, 42, allocator);
     defer ctx1.deinit(io);
 
     // ユーザー名をさらに重ねて格納する
-    const ctx2 = try zctx.withTypedValue(UserNameKey, allocator, ctx1.context, "alice");
+    const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocator);
     defer ctx2.deinit(io);
 
     // 子コンテキストから両方の値を取得できる

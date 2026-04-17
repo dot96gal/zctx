@@ -29,13 +29,13 @@ const zctx = @import("zctx");
 // ルートコンテキスト（アロケータ不要）
 zctx.background        // キャンセルされないルート
 zctx.todo              // 未実装のプレースホルダー
-zctx.cancelled  // 最初からキャンセル済み
+zctx.canceled   // 最初からキャンセル済み
 
 // 派生コンテキスト（返り値は OwnedContext）
 zctx.withCancel(io, parent, alloc)                    // error{OutOfMemory}!OwnedContext
 zctx.withTimeout(io, parent, timeoutNs, alloc)        // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
-zctx.withDeadline(io, parent, deadlineNs: i96, alloc) // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
-zctx.withTypedValue(Key, alloc, parent, value)        // error{OutOfMemory}!OwnedContext
+zctx.withDeadline(io, parent, deadline: std.Io.Clock.Timestamp, alloc) // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
+zctx.withTypedValue(parent, Key, value, alloc)                         // error{OutOfMemory}!OwnedContext
 
 // OwnedContext のメソッド
 result.context      // Context 値
@@ -45,7 +45,7 @@ result.deinit(io)   // メモリ解放（未キャンセルなら先にキャン
 // Context のメソッド
 ctx.done()               // *Signal  — isFired() / wait(io) で待機できる
 ctx.err(io)              // ?ContextError  — null / error.Canceled / error.DeadlineExceeded
-ctx.deadline()           // ?i96  — std.Io.Clock.Timestamp 基準のデッドライン
+ctx.deadline()           // ?std.Io.Clock.Timestamp  — デッドライン（なければ null）
 ctx.typedValue(Key)      // ?Key.Value  — 型安全な値の取り出し
 
 // Signal のユーティリティ
@@ -80,7 +80,7 @@ fn doWork(ctx: zctx.Context, io: std.Io) void {
     while (ctx.err(io) == null) {
         std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
     }
-    std.debug.print("cancelled: {?}\n", .{ctx.err(io)});
+    std.debug.print("canceled: {?}\n", .{ctx.err(io)});
 }
 ```
 
@@ -91,6 +91,19 @@ const result = try zctx.withTimeout(io, zctx.background, 5 * std.time.ns_per_s, 
 defer result.deinit(io);
 
 // タイムアウトまで待機
+result.context.done().wait(io);
+std.debug.print("err: {?}\n", .{result.context.err(io)}); // error.DeadlineExceeded
+```
+
+### デッドライン
+
+```zig
+const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + 5 * std.time.ns_per_s }, .clock = .awake };
+const result = try zctx.withDeadline(io, zctx.background, dl, allocator);
+defer result.deinit(io);
+
+// デッドラインまで待機
 result.context.done().wait(io);
 std.debug.print("err: {?}\n", .{result.context.err(io)}); // error.DeadlineExceeded
 ```
@@ -115,10 +128,10 @@ std.debug.print("child err: {?}\n", .{child.context.err(io)}); // error.Canceled
 const RequestIdKey = zctx.TypedKey(u64);
 const UserNameKey  = zctx.TypedKey([]const u8);
 
-const ctx1 = try zctx.withTypedValue(RequestIdKey, allocator, zctx.background, 42);
+const ctx1 = try zctx.withTypedValue(zctx.background, RequestIdKey, 42, allocator);
 defer ctx1.deinit(io);
 
-const ctx2 = try zctx.withTypedValue(UserNameKey, allocator, ctx1.context, "alice");
+const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocator);
 defer ctx2.deinit(io);
 
 // 子コンテキストから祖先の値を取り出せる
@@ -199,6 +212,7 @@ mise run serve-docs  # ドキュメントをローカルサーバーで開く
 
 mise run example:basic       # withCancel の基本例
 mise run example:timeout     # withTimeout の例
+mise run example:deadline    # withDeadline の例
 mise run example:propagation # 親→子キャンセル伝播の例
 mise run example:value       # TypedKey の例
 mise run example:wait_any    # waitAny の例
@@ -214,6 +228,7 @@ src/
 example/
   basic.zig       — withCancel の基本的な使い方
   timeout.zig     — withTimeout
+  deadline.zig    — withDeadline
   propagation.zig — 親→子キャンセル伝播
   value.zig       — TypedKey による値の受け渡し
   wait_any.zig    — waitAny による複数シグナル待機
@@ -224,14 +239,14 @@ example/
 #### Context はタグ付き共用体
 
 `Context` は vtable ではなくタグ付き共用体で実装している。種類が閉じた集合
-（background / todo / cancelled / cancel / deadline / value）であり、switch の網羅性が
+（background / todo / canceled / cancel / deadline / value）であり、switch の網羅性が
 コンパイル時に保証される。
 
 ```zig
 pub const Context = union(enum) {
     background,
     todo,
-    cancelled,
+    canceled,
     cancel:      *CancelCtx,
     deadlineCtx: *DeadlineCtx,
     valueCtx:    *ValueCtx,

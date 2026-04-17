@@ -39,6 +39,7 @@ pub fn build(b: *std.Build) void {
     const example_names = [_][]const u8{
         "basic",
         "timeout",
+        "deadline",
         "propagation",
         "value",
         "wait_any",

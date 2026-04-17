@@ -27,6 +27,10 @@ run = "zig build run-example-basic --summary all"
 description = "run example/timeout.zig"
 run = "zig build run-example-timeout --summary all"
 
+[tasks."example:deadline"]
+description = "run example/deadline.zig"
+run = "zig build run-example-deadline --summary all"
+
 [tasks."example:propagation"]
 description = "run example/propagation.zig"
 run = "zig build run-example-propagation --summary all"

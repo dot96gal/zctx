@@ -19,7 +19,7 @@ pub const background = @import("context.zig").background;
 /// プレースホルダーコンテキスト。background と同じ振る舞い。
 pub const todo = @import("context.zig").todo;
 /// 最初からキャンセル済みのコンテキスト。
-pub const cancelled = @import("context.zig").cancelled;
+pub const canceled = @import("context.zig").canceled;
 
 /// 手動キャンセル可能なコンテキストを作成する。
 pub const withCancel = @import("context.zig").withCancel;

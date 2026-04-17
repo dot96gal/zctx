@@ -21,7 +21,7 @@ var alwaysFiredSignal: Signal = .{ .fired = .is_set };
 pub const Context = union(enum) {
     background,
     todo,
-    cancelled,
+    canceled,
     cancel: *CancelCtx,
     deadlineCtx: *DeadlineCtx,
     valueCtx: *ValueCtx,
@@ -30,7 +30,7 @@ pub const Context = union(enum) {
     pub fn done(ctx: Context) *Signal {
         return switch (ctx) {
             .background, .todo => &neverFiredSignal,
-            .cancelled => &alwaysFiredSignal,
+            .canceled => &alwaysFiredSignal,
             .cancel => |c| &c.state.signal,
             .deadlineCtx => |d| &d.state.signal,
             .valueCtx => |v| v.parent.done(),
@@ -41,7 +41,7 @@ pub const Context = union(enum) {
     pub fn err(ctx: Context, io: std.Io) ?ContextError {
         return switch (ctx) {
             .background, .todo => null,
-            .cancelled => ContextError.Canceled,
+            .canceled => ContextError.Canceled,
             .cancel => |c| blk: {
                 c.state.mutex.lockUncancelable(io);
                 defer c.state.mutex.unlock(io);
@@ -56,13 +56,13 @@ pub const Context = union(enum) {
         };
     }
 
-    /// デッドライン（std.Io.Clock.Timestamp 基準ナノ秒）を返す。なければ null。
-    pub fn deadline(ctx: Context) ?i96 {
+    /// デッドラインを返す。なければ null。
+    pub fn deadline(ctx: Context) ?std.Io.Clock.Timestamp {
         return switch (ctx) {
             .background, .todo => null,
-            .cancelled => null,
+            .canceled => null,
             .cancel => null,
-            .deadlineCtx => |d| d.deadlineNs,
+            .deadlineCtx => |d| d.deadline,
             .valueCtx => |v| v.parent.deadline(),
         };
     }
@@ -70,7 +70,7 @@ pub const Context = union(enum) {
     fn rawValue(ctx: Context, key: *const anyopaque) ?*anyopaque {
         return switch (ctx) {
             .background, .todo => null,
-            .cancelled => null,
+            .canceled => null,
             // cancel / deadlineCtx は自身に値を持たないが、先祖の valueCtx に委譲する。
             .cancel => |c| c.parent.rawValue(key),
             .deadlineCtx => |d| d.parent.rawValue(key),
@@ -92,7 +92,7 @@ pub const OwnedContext = struct {
     /// シグナルのみ発火。メモリは解放しない。idempotent。
     pub fn cancel(self: OwnedContext, io: std.Io) void {
         switch (self.context) {
-            .background, .todo, .cancelled => {},
+            .background, .todo, .canceled => {},
             .cancel => |c| c.state.cancelFn(io, error.Canceled),
             .deadlineCtx => |d| d.state.cancelFn(io, error.Canceled),
             .valueCtx => {},
@@ -102,7 +102,7 @@ pub const OwnedContext = struct {
     /// メモリを解放する。未キャンセルなら先にキャンセルしてから解放。defer で必ず呼ぶ。
     pub fn deinit(self: OwnedContext, io: std.Io) void {
         switch (self.context) {
-            .background, .todo, .cancelled => {},
+            .background, .todo, .canceled => {},
             .cancel => |c| c.deinit(io),
             .deadlineCtx => |d| d.deinit(io),
             .valueCtx => |v| v.deinit(),
@@ -117,7 +117,7 @@ pub const background: Context = .background;
 pub const todo: Context = .todo;
 
 /// 最初からキャンセル済みのコンテキスト（アロケータ不要）。
-pub const cancelled: Context = .cancelled;
+pub const canceled: Context = .canceled;
 
 /// comptime 型安全キー。
 /// key は型ごとにユニークなポインタ。
@@ -202,7 +202,7 @@ const DeadlineCtx = struct {
     allocator: std.mem.Allocator,
     parent: Context,
     state: CancelState,
-    deadlineNs: i96,
+    deadline: std.Io.Clock.Timestamp,
     io: std.Io,
     timerThread: ?std.Thread,
 
@@ -233,7 +233,7 @@ const ValueCtx = struct {
 fn registerChild(io: std.Io, parent: Context, child: CancelState.CancelChild) !void {
     return switch (parent) {
         .background, .todo => {},
-        .cancelled => child.propagate(io, error.Canceled),
+        .canceled => child.propagate(io, error.Canceled),
         .cancel => |p| try registerToState(io, &p.state, child),
         .deadlineCtx => |p| try registerToState(io, &p.state, child),
         .valueCtx => |v| try registerChild(io, v.parent, child),
@@ -268,7 +268,7 @@ pub fn withCancel(io: std.Io, parent: Context, allocator: std.mem.Allocator) err
 /// タイマースレッドのワーカー。
 fn timerWorker(ctx: *DeadlineCtx) void {
     const now = std.Io.Clock.Timestamp.now(ctx.io, .awake).raw.nanoseconds;
-    const remaining = ctx.deadlineNs - now;
+    const remaining = ctx.deadline.raw.nanoseconds - now;
     if (remaining > 0) {
         const waitNs: u64 = if (remaining > std.math.maxInt(u64))
             std.math.maxInt(u64)
@@ -279,11 +279,11 @@ fn timerWorker(ctx: *DeadlineCtx) void {
     ctx.state.cancelFn(ctx.io, error.DeadlineExceeded);
 }
 
-/// デッドライン付きコンテキストを作成する。deadlineNs は std.Io.Clock.Timestamp 基準（i96）。
+/// デッドライン付きコンテキストを作成する。
 pub fn withDeadline(
     io: std.Io,
     parent: Context,
-    deadlineNs: i96,
+    dl: std.Io.Clock.Timestamp,
     allocator: std.mem.Allocator,
 ) (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext {
     const ctx = try allocator.create(DeadlineCtx);
@@ -292,13 +292,13 @@ pub fn withDeadline(
         .allocator = allocator,
         .parent = parent,
         .state = CancelState.init(allocator),
-        .deadlineNs = deadlineNs,
+        .deadline = dl,
         .io = io,
         .timerThread = null,
     };
 
     // fast-path: 既に期限切れならスレッド不要
-    if (deadlineNs <= std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds) {
+    if (dl.raw.nanoseconds <= std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds) {
         try registerChild(io, parent, .{ .deadlineCtx = ctx });
         ctx.state.cancelFn(io, error.DeadlineExceeded);
         return .{ .context = .{ .deadlineCtx = ctx } };
@@ -322,16 +322,17 @@ pub fn withTimeout(
     timeoutNs: u64,
     allocator: std.mem.Allocator,
 ) (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext {
-    const dl = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds + @as(i96, timeoutNs);
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + @as(i96, timeoutNs) }, .clock = .awake };
     return withDeadline(io, parent, dl, allocator);
 }
 
 /// 型安全な値付きコンテキストを作成する。
 pub fn withTypedValue(
-    comptime Key: type,
-    allocator: std.mem.Allocator,
     parent: Context,
+    comptime Key: type,
     val: Key.Value,
+    allocator: std.mem.Allocator,
 ) error{OutOfMemory}!OwnedContext {
     const valPtr = try allocator.create(Key.Value);
     errdefer allocator.destroy(valPtr);
@@ -365,10 +366,10 @@ test "todo: doneにならない" {
     try std.testing.expectEqual(@as(?ContextError, null), todo.err(io));
 }
 
-test "cancelled: 即座にdone" {
+test "canceled: 即座にdone" {
     const io = std.testing.io;
-    try std.testing.expectEqual(ContextError.Canceled, cancelled.err(io).?);
-    try std.testing.expect(cancelled.done().isFired());
+    try std.testing.expectEqual(ContextError.Canceled, canceled.err(io).?);
+    try std.testing.expect(canceled.done().isFired());
 }
 
 test "withCancel: 初期状態はdoneでない" {
@@ -433,9 +434,9 @@ test "withCancel: キャンセル済み親から作った子は即座にdone" {
     try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
 }
 
-test "withCancel: cancelledを親にすると即座にdone" {
+test "withCancel: canceledを親にすると即座にdone" {
     const io = std.testing.io;
-    const child = try withCancel(io, cancelled, std.testing.allocator);
+    const child = try withCancel(io, canceled, std.testing.allocator);
     defer child.deinit(io);
     try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
 }
@@ -460,7 +461,7 @@ test "withTimeout: 期限前にcancel → Canceled" {
 
 test "withDeadline: 過去のdeadlineは即座にDeadlineExceeded（fast-path）" {
     const io = std.testing.io;
-    const past = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
+    const past = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1 }, .clock = .awake };
     const r = try withDeadline(io, background, past, std.testing.allocator);
     defer r.deinit(io);
     try std.testing.expectEqual(ContextError.DeadlineExceeded, r.context.err(io).?);
@@ -473,7 +474,7 @@ test "withDeadline: 親がキャンセル済みのfast-pathはCanceled" {
     parent.cancel(io);
     defer parent.deinit(io);
 
-    const past = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1;
+    const past = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds - 1 }, .clock = .awake };
     const child = try withDeadline(io, parent.context, past, std.testing.allocator);
     defer child.deinit(io);
     try std.testing.expectEqual(ContextError.Canceled, child.context.err(io).?);
@@ -488,7 +489,7 @@ test "withTimeout: cancel後にdeinitしてもブロックしない" {
 
 test "withTypedValue: 対応するキーの値を返す" {
     const Key = TypedKey(u32);
-    const r = try withTypedValue(Key, std.testing.allocator, background, 42);
+    const r = try withTypedValue(background, Key, 42, std.testing.allocator);
     defer r.deinit(std.testing.io);
     try std.testing.expectEqual(@as(?u32, 42), r.context.typedValue(Key));
 }
@@ -496,7 +497,7 @@ test "withTypedValue: 対応するキーの値を返す" {
 test "withTypedValue: 親チェーンを辿って値を返す" {
     const io = std.testing.io;
     const Key = TypedKey(u32);
-    const base = try withTypedValue(Key, std.testing.allocator, background, 42);
+    const base = try withTypedValue(background, Key, 42, std.testing.allocator);
     defer base.deinit(io);
     const child = try withCancel(io, base.context, std.testing.allocator);
     defer child.deinit(io);
@@ -507,23 +508,23 @@ test "withTypedValue: 親チェーンを辿って値を返す" {
 test "withTypedValue: キーが違えばnullを返す" {
     const Key1 = TypedKey(u32);
     const Key2 = TypedKey(u64);
-    const r = try withTypedValue(Key1, std.testing.allocator, background, 42);
+    const r = try withTypedValue(Key1, background, std.testing.allocator, 42);
     defer r.deinit(std.testing.io);
     try std.testing.expectEqual(@as(?u64, null), r.context.typedValue(Key2));
 }
 
 test "Context.deadline: withDeadlineで設定した値を返す" {
     const io = std.testing.io;
-    const now = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-    const dl = now + 10 * std.time.ns_per_s;
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + 10 * std.time.ns_per_s }, .clock = .awake };
     const r = try withDeadline(io, background, dl, std.testing.allocator);
     defer r.deinit(io);
-    try std.testing.expectEqual(@as(?i96, dl), r.context.deadline());
+    try std.testing.expectEqual(@as(?std.Io.Clock.Timestamp, dl), r.context.deadline());
 }
 
 test "Context.deadline: withCancelはnullを返す" {
     const io = std.testing.io;
     const r = try withCancel(io, background, std.testing.allocator);
     defer r.deinit(io);
-    try std.testing.expectEqual(@as(?i96, null), r.context.deadline());
+    try std.testing.expectEqual(@as(?std.Io.Clock.Timestamp, null), r.context.deadline());
 }
