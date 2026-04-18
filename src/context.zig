@@ -15,9 +15,7 @@ pub const ContextError = error{
 var neverFiredSignal: SignalSource = .{};
 var alwaysFiredSignal: SignalSource = .{ .fired = .is_set };
 
-/// タグ付き共用体によるContext。
-/// フィールド名とメソッド名の衝突を避けるため、deadline/value の派生コンテキストは
-/// deadlineCtx / valueCtx という variant 名を使う。
+/// コンテキスト型。
 pub const Context = union(enum) {
     background,
     todo,
@@ -37,7 +35,7 @@ pub const Context = union(enum) {
         };
     }
 
-    /// コンテキストの終了理由を返す。未キャンセルなら null。
+    /// コンテキストの終了理由を返す。未キャンセルなら null を返す。
     pub fn err(ctx: Context, io: std.Io) ?ContextError {
         return switch (ctx) {
             .background, .todo => null,
@@ -56,7 +54,7 @@ pub const Context = union(enum) {
         };
     }
 
-    /// デッドラインを返す。なければ null。
+    /// デッドラインを返す。設定されていなければ null を返す。
     pub fn deadline(ctx: Context) ?std.Io.Clock.Timestamp {
         return switch (ctx) {
             .background, .todo => null,
@@ -78,7 +76,7 @@ pub const Context = union(enum) {
         };
     }
 
-    /// 型安全な値の取り出し。
+    /// キーに対応する値を型安全に返す。値が存在しなければ null を返す。
     pub fn typedValue(ctx: Context, comptime Key: type) ?Key.Value {
         const raw = ctx.rawValue(Key.key) orelse return null;
         return @as(*Key.Value, @ptrCast(@alignCast(raw))).*;
@@ -89,7 +87,7 @@ pub const Context = union(enum) {
 pub const OwnedContext = struct {
     context: Context,
 
-    /// シグナルのみ発火。メモリは解放しない。idempotent。
+    /// シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
     pub fn cancel(self: OwnedContext, io: std.Io) void {
         switch (self.context) {
             .background, .todo, .canceled => {},
@@ -99,7 +97,7 @@ pub const OwnedContext = struct {
         }
     }
 
-    /// メモリを解放する。未キャンセルなら先にキャンセルしてから解放。defer で必ず呼ぶ。
+    /// メモリを解放する。未キャンセルなら先にキャンセルしてから解放する。defer で必ず呼ぶ。
     pub fn deinit(self: OwnedContext, io: std.Io) void {
         switch (self.context) {
             .background, .todo, .canceled => {},
@@ -113,15 +111,13 @@ pub const OwnedContext = struct {
 /// ルートコンテキスト（アロケータ不要）。キャンセルされない。
 pub const background: Context = .background;
 
-/// プレースホルダー（アロケータ不要）。background と同じ振る舞い。
+/// プレースホルダー（アロケータ不要）。background と同じように振る舞う。
 pub const todo: Context = .todo;
 
 /// 最初からキャンセル済みのコンテキスト（アロケータ不要）。
 pub const canceled: Context = .canceled;
 
-/// comptime 型安全キー。
-/// key は型ごとにユニークなポインタ。
-/// u8 の var 変数を使うことでリンカが同一アドレスにマージしないことを保証する。
+/// comptime 型安全キーを生成する。`withTypedValue` / `typedValue` で使用する。
 pub fn TypedKey(comptime T: type) type {
     return struct {
         pub const Value = T;
@@ -164,7 +160,7 @@ const CancelState = struct {
         };
     }
 
-    /// シグナルのみ発火。メモリは解放しない。idempotent。
+    /// シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
     fn cancelFn(self: *CancelState, io: std.Io, reason: ContextError) void {
         self.mutex.lockUncancelable(io);
         if (self.cancelErr != null) {

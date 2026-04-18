@@ -1,16 +1,16 @@
 const std = @import("std");
 
-/// 待機専用の一射シグナル。`fire()` は呼べない。GoのDone()チャンネルのclose相当。
+/// 一度だけ発火する待機専用のシグナル。`fire()` は呼べない。Go の `Done()` チャンネルを閉じる操作に相当する。
 /// `Context.done()` が返す型。
 pub const Signal = struct {
     source: *SignalSource,
 
-    /// ノンブロッキング確認（ポーリング）
+    /// 発火状態をノンブロッキングで確認する。
     pub fn isFired(self: Signal) bool {
         return self.source.isFired();
     }
 
-    /// 発火まで ブロック
+    /// 発火するまでブロックする。
     pub fn wait(self: Signal, io: std.Io) void {
         self.source.wait(io);
     }
@@ -22,7 +22,7 @@ pub const Signal = struct {
     }
 };
 
-/// 一射ブロードキャストシグナルのソース。`var src = SignalSource{}` で初期化可能。
+/// 一度だけ発火するブロードキャストシグナルのソース。`var src = SignalSource{}` で初期化可能。
 /// 内部型。`Context.done()` は `Signal`（待機専用ラッパー）を返す。
 pub const SignalSource = struct {
     fired: std.Io.Event = .unset,
@@ -35,7 +35,7 @@ pub const SignalSource = struct {
         self.fired.waitUncancelable(io);
     }
 
-    /// 発火（idempotent）。
+    /// 発火する。複数回呼んでも安全に動作する（冪等）。
     pub fn fire(self: *SignalSource, io: std.Io) void {
         if (self.fired.isSet()) return;
         self.fired.set(io);
