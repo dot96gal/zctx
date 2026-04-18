@@ -39,19 +39,15 @@ run = "zig build run-example-propagation --summary all"
 description = "run example/value.zig"
 run = "zig build run-example-value --summary all"
 
-[tasks."example:wait_any"]
-description = "run example/wait_any.zig"
-run = "zig build run-example-wait_any --summary all"
+[tasks."example:multi_cancel"]
+description = "run example/multi_cancel.zig"
+run = "zig build run-example-multi_cancel --summary all"
 
 [tasks.build-docs]
 description = "Build API documentation"
 run = "zig build docs --summary all"
 
 [tasks.serve-docs]
-description = "Serve and open API documentation"
+description = "Serve API documentation"
 depends = ["build-docs"]
-run = """
-npx --yes serve zig-out/docs &
-sleep 1
-open http://localhost:3000
-"""
+run = "npx --yes serve zig-out/docs"

@@ -42,7 +42,7 @@ pub fn build(b: *std.Build) void {
         "deadline",
         "propagation",
         "value",
-        "wait_any",
+        "multi_cancel",
     };
 
     for (&example_names) |name| {

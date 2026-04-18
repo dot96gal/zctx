@@ -1,9 +1,7 @@
 //! zctx: Zig向けのGoのContext（キャンセル）実装。
 
-/// 一射ブロードキャストシグナル。GoのDone()チャンネルのclose相当。
+/// 待機専用の一射シグナル。`fire()` は呼べない。GoのDone()チャンネルのclose相当。
 pub const Signal = @import("signal.zig").Signal;
-/// 複数シグナルのいずれかを待つ（Goのselect相当）。
-pub const waitAny = @import("signal.zig").waitAny;
 
 /// タグ付き共用体によるコンテキスト型。
 pub const Context = @import("context.zig").Context;

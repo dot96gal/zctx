@@ -1,6 +1,7 @@
 const std = @import("std");
 const signal_mod = @import("signal.zig");
 pub const Signal = signal_mod.Signal;
+const SignalSource = signal_mod.SignalSource;
 
 /// コンテキストの終了理由。
 pub const ContextError = error{
@@ -10,10 +11,9 @@ pub const ContextError = error{
 
 // モジュールレベル変数。Context.done() が参照する。
 // neverFiredSignal は background / todo の done() が返す共有シグナル。
-// 外部から fire されることはないため、waitAny() に background.done() / todo.done() を
-// 渡した場合、対応する WaiterNode はリークする。これらを waitAny() に渡さないこと。
-var neverFiredSignal: Signal = .{};
-var alwaysFiredSignal: Signal = .{ .fired = .is_set };
+// Signal ラッパー経由では fire() を呼べない（型で保証）。
+var neverFiredSignal: SignalSource = .{};
+var alwaysFiredSignal: SignalSource = .{ .fired = .is_set };
 
 /// タグ付き共用体によるContext。
 /// フィールド名とメソッド名の衝突を避けるため、deadline/value の派生コンテキストは
@@ -26,13 +26,13 @@ pub const Context = union(enum) {
     deadlineCtx: *DeadlineCtx,
     valueCtx: *ValueCtx,
 
-    /// キャンセルシグナルを返す。background / todo は永遠に発火しない。
-    pub fn done(ctx: Context) *Signal {
+    /// 待機専用シグナルを返す（`fire()` 不可）。background / todo は永遠に発火しない。
+    pub fn done(ctx: Context) Signal {
         return switch (ctx) {
-            .background, .todo => &neverFiredSignal,
-            .canceled => &alwaysFiredSignal,
-            .cancel => |c| &c.state.signal,
-            .deadlineCtx => |d| &d.state.signal,
+            .background, .todo => neverFiredSignal.signal(),
+            .canceled => alwaysFiredSignal.signal(),
+            .cancel => |c| c.state.source.signal(),
+            .deadlineCtx => |d| d.state.source.signal(),
             .valueCtx => |v| v.parent.done(),
         };
     }
@@ -136,7 +136,7 @@ pub fn TypedKey(comptime T: type) type {
 
 /// CancelCtx / DeadlineCtx 共通の状態とキャンセルロジック。
 const CancelState = struct {
-    signal: Signal,
+    source: SignalSource,
     cancelErr: ?ContextError,
     mutex: std.Io.Mutex,
     allocator: std.mem.Allocator,
@@ -156,7 +156,7 @@ const CancelState = struct {
 
     fn init(allocator: std.mem.Allocator) CancelState {
         return .{
-            .signal = .{},
+            .source = .{},
             .cancelErr = null,
             .mutex = .init,
             .allocator = allocator,
@@ -179,7 +179,7 @@ const CancelState = struct {
         self.mutex.unlock(io);
         for (children.items) |child| child.propagate(io, reason);
         children.deinit(self.allocator);
-        self.signal.fire(io);
+        self.source.fire(io);
     }
 };
 
@@ -243,8 +243,8 @@ fn registerChild(io: std.Io, parent: Context, child: CancelState.CancelChild) !v
 fn registerToState(io: std.Io, state: *CancelState, child: CancelState.CancelChild) !void {
     state.mutex.lockUncancelable(io);
     defer state.mutex.unlock(io);
-    if (state.cancelErr != null) {
-        child.propagate(io, state.cancelErr.?);
+    if (state.cancelErr) |cerr| {
+        child.propagate(io, cerr);
     } else {
         try state.children.append(state.allocator, child);
     }
@@ -274,7 +274,7 @@ fn timerWorker(ctx: *DeadlineCtx) void {
             std.math.maxInt(u64)
         else
             @intCast(remaining);
-        if (ctx.state.signal.waitTimeout(ctx.io, waitNs)) return;
+        if (ctx.state.source.waitTimeout(ctx.io, waitNs)) return;
     }
     ctx.state.cancelFn(ctx.io, error.DeadlineExceeded);
 }
@@ -346,10 +346,10 @@ pub fn withTypedValue(
         .key = Key.key,
         .val = @ptrCast(valPtr),
         .valDeinit = struct {
-            fn f(alloc: std.mem.Allocator, ptr: *anyopaque) void {
+            fn deinitValue(alloc: std.mem.Allocator, ptr: *anyopaque) void {
                 alloc.destroy(@as(*Key.Value, @ptrCast(@alignCast(ptr))));
             }
-        }.f,
+        }.deinitValue,
     };
     return .{ .context = .{ .valueCtx = ctx } };
 }
@@ -527,4 +527,21 @@ test "Context.deadline: withCancelはnullを返す" {
     const r = try withCancel(io, background, std.testing.allocator);
     defer r.deinit(io);
     try std.testing.expectEqual(@as(?std.Io.Clock.Timestamp, null), r.context.deadline());
+}
+
+test "withCancel: done().waitTimeout は未キャンセルならfalseを返す" {
+    const io = std.testing.io;
+    const r = try withCancel(io, background, std.testing.allocator);
+    defer r.deinit(io);
+    const fired = r.context.done().waitTimeout(io, 1); // 1ns → タイムアウト
+    try std.testing.expect(!fired);
+}
+
+test "withCancel: done().waitTimeout はcancel後にtrueを返す" {
+    const io = std.testing.io;
+    const r = try withCancel(io, background, std.testing.allocator);
+    defer r.deinit(io);
+    r.cancel(io);
+    const fired = r.context.done().waitTimeout(io, 1 * std.time.ns_per_s);
+    try std.testing.expect(fired);
 }
