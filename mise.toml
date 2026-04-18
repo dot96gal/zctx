@@ -45,7 +45,7 @@ run = "zig build run-example-multi_cancel --summary all"
 
 [tasks.release]
 description = "bump version, commit, tag, and push"
-run = """
+run = '''
 #!/usr/bin/env bash
 set -euo pipefail
 VERSION=${1:?usage: mise run release <version>}
@@ -68,7 +68,7 @@ git add build.zig.zon
 git commit -m "chore: bump version to v$VERSION"
 git tag "v$VERSION"
 git push origin main "v$VERSION"
-"""
+'''
 
 [tasks.build-docs]
 description = "Build API documentation"
