@@ -3,6 +3,9 @@
   "permissions": {
     "allow": [
       "Bash(mise run *)"
+    ],
+    "deny": [
+      "Bash(mise run release*)"
     ]
   },
   "hooks": {
