@@ -1,6 +1,5 @@
-const zctx = @import("zctx");
-
 const std = @import("std");
+const zctx = @import("zctx");
 
 pub fn main(env: std.process.Init) !void {
     const io = env.io;

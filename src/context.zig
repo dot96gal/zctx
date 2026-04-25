@@ -1,7 +1,7 @@
 const std = @import("std");
-const signal_mod = @import("signal.zig");
-pub const Signal = signal_mod.Signal;
-const SignalSource = signal_mod.SignalSource;
+const signalMod = @import("signal.zig");
+pub const Signal = signalMod.Signal;
+const SignalSource = signalMod.SignalSource;
 
 /// コンテキストの終了理由。
 pub const ContextError = error{

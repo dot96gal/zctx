@@ -45,14 +45,14 @@ pub const SignalSource = struct {
     /// 発火した（または既に発火済み）なら true、タイムアウトなら false を返す。
     pub fn waitTimeout(self: *SignalSource, io: std.Io, timeoutNs: u64) bool {
         if (self.fired.isSet()) return true;
-        const deadline_ts = std.Io.Clock.Timestamp.fromNow(io, .{
+        const deadlineTs = std.Io.Clock.Timestamp.fromNow(io, .{
             .raw = .{ .nanoseconds = @intCast(timeoutNs) },
             .clock = .awake,
         });
-        const timeout: std.Io.Timeout = .{ .deadline = deadline_ts };
+        const timeout: std.Io.Timeout = .{ .deadline = deadlineTs };
         while (!self.fired.isSet()) {
             const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-            if (nowNs >= deadline_ts.raw.nanoseconds) return false;
+            if (nowNs >= deadlineTs.raw.nanoseconds) return false;
             self.fired.waitTimeout(io, timeout) catch |err| switch (err) {
                 error.Timeout, error.Canceled => {},
             };

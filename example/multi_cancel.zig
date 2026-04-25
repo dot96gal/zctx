@@ -1,5 +1,5 @@
-const zctx = @import("zctx");
 const std = @import("std");
+const zctx = @import("zctx");
 
 pub fn main(env: std.process.Init) !void {
     const io = env.io;
@@ -8,13 +8,13 @@ pub fn main(env: std.process.Init) !void {
     std.debug.print("=== multi_cancel: 親コンテキストで複数キャンセル条件を合成する ===\n", .{});
 
     // タイムアウト付き親コンテキストを作成（200ms）
-    const timeout_ctx = try zctx.withTimeout(io, zctx.background, 200 * std.time.ns_per_ms, allocator);
-    defer timeout_ctx.deinit(io);
+    const timeoutCtx = try zctx.withTimeout(io, zctx.background, 200 * std.time.ns_per_ms, allocator);
+    defer timeoutCtx.deinit(io);
 
     // 手動キャンセル可能な子コンテキストを親から派生
     // → タイムアウト OR 手動キャンセルのどちらかで終了する
-    const work_ctx = try zctx.withCancel(io, timeout_ctx.context, allocator);
-    defer work_ctx.deinit(io);
+    const workCtx = try zctx.withCancel(io, timeoutCtx.context, allocator);
+    defer workCtx.deinit(io);
 
     // 別スレッドで 50ms 後に手動キャンセル（タイムアウトより先に到達）
     const thread = try std.Thread.spawn(.{}, struct {
@@ -22,11 +22,11 @@ pub fn main(env: std.process.Init) !void {
             std.Io.sleep(tio, .{ .nanoseconds = 50 * std.time.ns_per_ms }, .awake) catch {};
             ctx.cancel(tio);
         }
-    }.run, .{ work_ctx, io });
+    }.run, .{ workCtx, io });
     defer thread.join();
 
-    work_ctx.context.done().wait(io);
+    workCtx.context.done().wait(io);
 
-    std.debug.print("終了理由: {?}\n", .{work_ctx.context.err(io)});
+    std.debug.print("終了理由: {?}\n", .{workCtx.context.err(io)});
     // → error.Canceled（手動キャンセルが 50ms で到達、タイムアウト 200ms より先）
 }

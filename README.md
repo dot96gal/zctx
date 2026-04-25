@@ -71,9 +71,9 @@ zctx.withDeadline(io, parent, deadline: std.Io.Clock.Timestamp, alloc) // (error
 zctx.withTypedValue(parent, Key, value, alloc)                         // error{OutOfMemory}!OwnedContext
 
 // OwnedContext のメソッド
-result.context      // Context 値
-result.cancel(io)   // シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
-result.deinit(io)   // メモリを解放する。未キャンセルなら先にキャンセルしてから解放する。defer で必ず呼ぶ。
+owned.context      // Context 値
+owned.cancel(io)   // シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
+owned.deinit(io)   // メモリを解放する。未キャンセルなら先にキャンセルしてから解放する。defer で必ず呼ぶ。
 
 // Context のメソッド
 ctx.done()               // Signal（値型、fire() 不可）— isFired() / wait(io) で待機できる
@@ -90,22 +90,22 @@ signal.waitTimeout(io, timeoutNs)  // bool — 発火=true / タイムアウト=
 ### 基本的なキャンセル
 
 ```zig
-const zctx = @import("zctx");
 const std = @import("std");
+const zctx = @import("zctx");
 
 pub fn main(env: std.process.Init) !void {
     const io = env.io;
     const allocator = env.gpa;
 
-    const result = try zctx.withCancel(io, zctx.background, allocator);
-    defer result.deinit(io);
+    const cancelCtx = try zctx.withCancel(io, zctx.background, allocator);
+    defer cancelCtx.deinit(io);
 
-    const thread = try std.Thread.spawn(.{}, doWork, .{ result.context, io });
+    const thread = try std.Thread.spawn(.{}, doWork, .{ cancelCtx.context, io });
     defer thread.join();
 
     std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake) catch {};
-    result.cancel(io); // スレッドに中断を伝える
-    // defer の LIFO 順: thread.join() → result.deinit(io) の順に実行される
+    cancelCtx.cancel(io); // スレッドに中断を伝える
+    // defer の LIFO 順: thread.join() → cancelCtx.deinit(io) の順に実行される
 }
 
 fn doWork(ctx: zctx.Context, io: std.Io) void {
@@ -119,25 +119,25 @@ fn doWork(ctx: zctx.Context, io: std.Io) void {
 ### タイムアウト
 
 ```zig
-const result = try zctx.withTimeout(io, zctx.background, 5 * std.time.ns_per_s, allocator);
-defer result.deinit(io);
+const timeoutCtx = try zctx.withTimeout(io, zctx.background, 5 * std.time.ns_per_s, allocator);
+defer timeoutCtx.deinit(io);
 
 // タイムアウトまで待機
-result.context.done().wait(io);
-std.debug.print("err: {?}\n", .{result.context.err(io)}); // error.DeadlineExceeded
+timeoutCtx.context.done().wait(io);
+std.debug.print("err: {?}\n", .{timeoutCtx.context.err(io)}); // error.DeadlineExceeded
 ```
 
 ### デッドライン
 
 ```zig
-const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + 5 * std.time.ns_per_s }, .clock = .awake };
-const result = try zctx.withDeadline(io, zctx.background, dl, allocator);
-defer result.deinit(io);
+const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + 5 * std.time.ns_per_s }, .clock = .awake };
+const deadlineCtx = try zctx.withDeadline(io, zctx.background, dl, allocator);
+defer deadlineCtx.deinit(io);
 
 // デッドラインまで待機
-result.context.done().wait(io);
-std.debug.print("err: {?}\n", .{result.context.err(io)}); // error.DeadlineExceeded
+deadlineCtx.context.done().wait(io);
+std.debug.print("err: {?}\n", .{deadlineCtx.context.err(io)}); // error.DeadlineExceeded
 ```
 
 ### 親→子キャンセル伝播
@@ -167,8 +167,8 @@ const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocat
 defer ctx2.deinit(io);
 
 // 子コンテキストから祖先の値を取り出せる
-const req_id   = ctx2.context.typedValue(RequestIdKey); // ?u64 → 42
-const username = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alice"
+const reqId    = ctx2.context.typedValue(RequestIdKey); // ?u64 → 42
+const userName = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alice"
 ```
 
 ### 複数キャンセル条件の合成
@@ -178,15 +178,15 @@ const username = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alic
 
 ```zig
 // タイムアウト付き親コンテキスト（200ms）
-const timeout_ctx = try zctx.withTimeout(io, zctx.background, 200 * std.time.ns_per_ms, allocator);
-defer timeout_ctx.deinit(io);
+const timeoutCtx = try zctx.withTimeout(io, zctx.background, 200 * std.time.ns_per_ms, allocator);
+defer timeoutCtx.deinit(io);
 
 // 手動キャンセル可能な子コンテキスト → タイムアウト OR 手動キャンセルで終了
-const work_ctx = try zctx.withCancel(io, timeout_ctx.context, allocator);
-defer work_ctx.deinit(io);
+const workCtx = try zctx.withCancel(io, timeoutCtx.context, allocator);
+defer workCtx.deinit(io);
 
-work_ctx.context.done().wait(io);
-std.debug.print("err: {?}\n", .{work_ctx.context.err(io)});
+workCtx.context.done().wait(io);
+std.debug.print("err: {?}\n", .{workCtx.context.err(io)});
 ```
 
 ### エラーハンドリング
@@ -206,10 +206,10 @@ fn handleRequest(ctx: zctx.Context, io: std.Io) !void {
 `defer` の LIFO 順を活用して `deinit` を `join` より先に宣言する。
 
 ```zig
-const result = try zctx.withCancel(io, zctx.background, allocator);
-defer result.deinit(io); // 宣言順: 1番目 → 実行順: 2番目（後）
+const cancelCtx = try zctx.withCancel(io, zctx.background, allocator);
+defer cancelCtx.deinit(io); // 宣言順: 1番目 → 実行順: 2番目（後）
 
-const t = try std.Thread.spawn(.{}, worker, .{result.context});
+const t = try std.Thread.spawn(.{}, worker, .{cancelCtx.context});
 defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
 ```
 
@@ -253,16 +253,16 @@ mise run example:multi_cancel # 複数キャンセル条件の合成例
 
 ```
 src/
-  root.zig      — 公開 API の再エクスポート
-  signal.zig    — SignalSource / Signal の実装とテスト
-  context.zig   — Context / withCancel / withDeadline / withTypedValue の実装とテスト
+  root.zig         # 公開 API の再エクスポート
+  signal.zig       # SignalSource / Signal の実装とテスト
+  context.zig      # Context / withCancel / withTimeout / withDeadline / withTypedValue の実装とテスト
 example/
-  basic.zig        — withCancel の基本的な使い方
-  timeout.zig      — withTimeout
-  deadline.zig     — withDeadline
-  propagation.zig  — 親→子キャンセル伝播
-  value.zig        — TypedKey による値の受け渡し
-  multi_cancel.zig — 親コンテキストで複数キャンセル条件を合成
+  basic.zig        # withCancel の基本的な使い方
+  timeout.zig      # withTimeout
+  deadline.zig     # withDeadline
+  propagation.zig  # 親→子キャンセル伝播
+  value.zig        # TypedKey による値の受け渡し
+  multi_cancel.zig # 親コンテキストで複数キャンセル条件を合成
 ```
 
 ### アーキテクチャ

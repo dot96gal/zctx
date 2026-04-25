@@ -1,6 +1,5 @@
-const zctx = @import("zctx");
-
 const std = @import("std");
+const zctx = @import("zctx");
 
 // TypedKey でコンテキストに格納するキーを定義する
 const RequestIdKey = zctx.TypedKey(u64);
@@ -21,9 +20,9 @@ pub fn main(env: std.process.Init) !void {
     defer ctx2.deinit(io);
 
     // 子コンテキストから両方の値を取得できる
-    const req_id = ctx2.context.typedValue(RequestIdKey);
-    const user_name = ctx2.context.typedValue(UserNameKey);
+    const reqId = ctx2.context.typedValue(RequestIdKey);
+    const userName = ctx2.context.typedValue(UserNameKey);
 
-    std.debug.print("request_id: {?}\n", .{req_id});
-    std.debug.print("user_name:  {?s}\n", .{user_name});
+    std.debug.print("reqId: {?}\n", .{reqId});
+    std.debug.print("userName:  {?s}\n", .{userName});
 }

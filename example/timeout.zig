@@ -1,6 +1,5 @@
-const zctx = @import("zctx");
-
 const std = @import("std");
+const zctx = @import("zctx");
 
 pub fn main(env: std.process.Init) !void {
     const io = env.io;
@@ -9,14 +8,14 @@ pub fn main(env: std.process.Init) !void {
     std.debug.print("=== timeout: withTimeout ===\n", .{});
 
     // 100ms のタイムアウトを設定する
-    const timeout_ns = 100 * std.time.ns_per_ms;
-    const result = try zctx.withTimeout(io, zctx.background, timeout_ns, allocator);
-    defer result.deinit(io);
+    const timeoutNs = 100 * std.time.ns_per_ms;
+    const timeoutCtx = try zctx.withTimeout(io, zctx.background, timeoutNs, allocator);
+    defer timeoutCtx.deinit(io);
 
-    std.debug.print("err before timeout: {?}\n", .{result.context.err(io)});
+    std.debug.print("err before timeout: {?}\n", .{timeoutCtx.context.err(io)});
 
     // タイムアウトまで待機する
-    result.context.done().wait(io);
+    timeoutCtx.context.done().wait(io);
 
-    std.debug.print("err after timeout:  {?}\n", .{result.context.err(io)});
+    std.debug.print("err after timeout:  {?}\n", .{timeoutCtx.context.err(io)});
 }
