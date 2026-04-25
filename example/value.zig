@@ -16,7 +16,7 @@ pub fn main(env: std.process.Init) !void {
     try stdout.print("=== value: TypedKey によるコンテキスト値の受け渡し ===\n", .{});
 
     // リクエスト ID をコンテキストに格納する
-    const ctx1 = try zctx.withTypedValue(zctx.background, RequestIdKey, 42, allocator);
+    const ctx1 = try zctx.withTypedValue(zctx.BACKGROUND, RequestIdKey, 42, allocator);
     defer ctx1.deinit(io);
 
     // ユーザー名をさらに重ねて格納する

@@ -12,7 +12,7 @@ pub fn main(env: std.process.Init) !void {
     try stdout.print("=== multi_cancel: 親コンテキストで複数キャンセル条件を合成する ===\n", .{});
 
     // タイムアウト付き親コンテキストを作成（200ms）
-    const timeoutCtx = try zctx.withTimeout(io, zctx.background, 200 * std.time.ns_per_ms, allocator);
+    const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 200 * std.time.ns_per_ms, allocator);
     defer timeoutCtx.deinit(io);
 
     // 手動キャンセル可能な子コンテキストを親から派生

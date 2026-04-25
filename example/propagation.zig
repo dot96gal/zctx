@@ -12,7 +12,7 @@ pub fn main(env: std.process.Init) !void {
     try stdout.print("=== propagation: 親のキャンセルが子に伝播する ===\n", .{});
 
     // 親コンテキストを作成する
-    const parent = try zctx.withCancel(io, zctx.background, allocator);
+    const parent = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
     defer parent.deinit(io);
 
     // 子コンテキストを親から派生させる

@@ -6,9 +6,9 @@ pub const ContextError = @import("context.zig").ContextError;
 pub const OwnedContext = @import("context.zig").OwnedContext;
 pub const TypedKey = @import("context.zig").TypedKey;
 
-pub const background = @import("context.zig").background;
-pub const todo = @import("context.zig").todo;
-pub const canceled = @import("context.zig").canceled;
+pub const BACKGROUND = @import("context.zig").BACKGROUND;
+pub const TODO = @import("context.zig").TODO;
+pub const CANCELED = @import("context.zig").CANCELED;
 
 pub const withCancel = @import("context.zig").withCancel;
 pub const withTimeout = @import("context.zig").withTimeout;

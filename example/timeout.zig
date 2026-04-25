@@ -13,7 +13,7 @@ pub fn main(env: std.process.Init) !void {
 
     // 100ms のタイムアウトを設定する
     const timeoutNs = 100 * std.time.ns_per_ms;
-    const timeoutCtx = try zctx.withTimeout(io, zctx.background, timeoutNs, allocator);
+    const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, timeoutNs, allocator);
     defer timeoutCtx.deinit(io);
 
     try stdout.print("err before timeout: {?}\n", .{timeoutCtx.context.err(io)});

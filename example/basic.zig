@@ -10,7 +10,7 @@ pub fn main(env: std.process.Init) !void {
     const stdout = &file_writer.interface;
 
     // withCancel でキャンセル可能なコンテキストを作成する
-    const cancelCtx = try zctx.withCancel(io, zctx.background, allocator);
+    const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
     defer cancelCtx.deinit(io);
 
     try stdout.print("=== basic: withCancel ===\n", .{});

@@ -53,9 +53,9 @@ exe.root_module.addImport("zctx", zctx_mod);
 const zctx = @import("zctx");
 
 // ルートコンテキスト（アロケータ不要）
-zctx.background        // キャンセルされないルート
-zctx.todo              // 未実装のプレースホルダー
-zctx.canceled          // 最初からキャンセル済み
+zctx.BACKGROUND        // キャンセルされないルート
+zctx.TODO              // 未実装のプレースホルダー
+zctx.CANCELED          // 最初からキャンセル済み
 
 // 型安全キーの生成（comptime）
 zctx.TypedKey(comptime T: type) // type — withTypedValue / typedValue で使うキー型を生成する
@@ -93,7 +93,7 @@ pub fn main(env: std.process.Init) !void {
     const io = env.io;
     const allocator = env.gpa;
 
-    const cancelCtx = try zctx.withCancel(io, zctx.background, allocator);
+    const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
     defer cancelCtx.deinit(io);
 
     const thread = try std.Thread.spawn(.{}, doWork, .{ cancelCtx.context, io });
@@ -115,7 +115,7 @@ fn doWork(ctx: zctx.Context, io: std.Io) void {
 ### タイムアウト
 
 ```zig
-const timeoutCtx = try zctx.withTimeout(io, zctx.background, 5 * std.time.ns_per_s, allocator);
+const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 5 * std.time.ns_per_s, allocator);
 defer timeoutCtx.deinit(io);
 
 // タイムアウトまで待機
@@ -128,7 +128,7 @@ std.debug.print("err: {?}\n", .{timeoutCtx.context.err(io)}); // error.DeadlineE
 ```zig
 const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + 5 * std.time.ns_per_s }, .clock = .awake };
-const deadlineCtx = try zctx.withDeadline(io, zctx.background, dl, allocator);
+const deadlineCtx = try zctx.withDeadline(io, zctx.BACKGROUND, dl, allocator);
 defer deadlineCtx.deinit(io);
 
 // デッドラインまで待機
@@ -139,7 +139,7 @@ std.debug.print("err: {?}\n", .{deadlineCtx.context.err(io)}); // error.Deadline
 ### 親→子キャンセル伝播
 
 ```zig
-const parent = try zctx.withCancel(io, zctx.background, allocator);
+const parent = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
 defer parent.deinit(io);
 
 const child = try zctx.withCancel(io, parent.context, allocator);
@@ -156,7 +156,7 @@ std.debug.print("child err: {?}\n", .{child.context.err(io)}); // error.Canceled
 const RequestIdKey = zctx.TypedKey(u64);
 const UserNameKey  = zctx.TypedKey([]const u8);
 
-const ctx1 = try zctx.withTypedValue(zctx.background, RequestIdKey, 42, allocator);
+const ctx1 = try zctx.withTypedValue(zctx.BACKGROUND, RequestIdKey, 42, allocator);
 defer ctx1.deinit(io);
 
 const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocator);
@@ -174,7 +174,7 @@ const userName = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alic
 
 ```zig
 // タイムアウト付き親コンテキスト（200ms）
-const timeoutCtx = try zctx.withTimeout(io, zctx.background, 200 * std.time.ns_per_ms, allocator);
+const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 200 * std.time.ns_per_ms, allocator);
 defer timeoutCtx.deinit(io);
 
 // 手動キャンセル可能な子コンテキスト → タイムアウト OR 手動キャンセルで終了
@@ -202,7 +202,7 @@ fn handleRequest(ctx: zctx.Context, io: std.Io) !void {
 `defer` の LIFO 順を活用して `deinit` を `join` より先に宣言する。
 
 ```zig
-const cancelCtx = try zctx.withCancel(io, zctx.background, allocator);
+const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
 defer cancelCtx.deinit(io); // 宣言順: 1番目 → 実行順: 2番目（後）
 
 const t = try std.Thread.spawn(.{}, worker, .{cancelCtx.context});
