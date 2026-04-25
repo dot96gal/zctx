@@ -9,7 +9,11 @@ pub fn main(env: std.process.Init) !void {
     const io = env.io;
     const allocator = env.gpa;
 
-    std.debug.print("=== value: TypedKey によるコンテキスト値の受け渡し ===\n", .{});
+    var buf: [4096]u8 = undefined;
+    var file_writer = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
+    const stdout = &file_writer.interface;
+
+    try stdout.print("=== value: TypedKey によるコンテキスト値の受け渡し ===\n", .{});
 
     // リクエスト ID をコンテキストに格納する
     const ctx1 = try zctx.withTypedValue(zctx.background, RequestIdKey, 42, allocator);
@@ -23,6 +27,7 @@ pub fn main(env: std.process.Init) !void {
     const reqId = ctx2.context.typedValue(RequestIdKey);
     const userName = ctx2.context.typedValue(UserNameKey);
 
-    std.debug.print("reqId: {?}\n", .{reqId});
-    std.debug.print("userName:  {?s}\n", .{userName});
+    try stdout.print("reqId: {?}\n", .{reqId});
+    try stdout.print("userName:  {?s}\n", .{userName});
+    try stdout.flush();
 }
