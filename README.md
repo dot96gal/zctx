@@ -1,7 +1,7 @@
 # zctx
 
 [![API Docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/zctx/)
-[![test](https://github.com/dot96gal/zctx/actions/workflows/test.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/test.yml)
+[![ci](https://github.com/dot96gal/zctx/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/ci.yml)
 [![release](https://github.com/dot96gal/zctx/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/release.yml)
 
 Go の `context` パッケージを Zig に移植したキャンセル伝播ライブラリ。
