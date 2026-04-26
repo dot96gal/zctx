@@ -229,8 +229,11 @@ mise install
 ### タスク
 
 ```sh
-mise run build   # コンパイルチェック（zig build --summary all）
-mise run test    # テスト実行
+mise run fmt        # フォーマット
+mise run fmt-check  # フォーマットチェック
+mise run lint       # リント
+mise run build      # ビルド
+mise run test       # テスト
 
 mise run build-docs  # API ドキュメント生成（zig-out/docs/ に出力）
 mise run serve-docs  # API ドキュメントをローカルサーバーで配信

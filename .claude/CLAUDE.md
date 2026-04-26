@@ -8,13 +8,14 @@
 
 - 計画ファイルは`.claude/plans/`ディレクトリに`YYYYMMDD_`の接頭辞を付与したファイル名で保存する
 
-## ツール
+## 開発環境
 
 - mise（zig のバージョンは `mise.toml` を参照）
-
-## 開発
-
 - mise タスクでコマンドを実行する。利用可能なタスクは `mise.toml` を参照すること。
+
+## 作業手順
+
+- `.zig` ファイルを扱う前に必ず LSP ツール（`documentSymbol` / `hover` / `findReferences` / `goToDefinition`）を使うこと。Read/Grep は LSP が応答しない場合のフォールバック専用。
 
 ## 依存関係
 
@@ -22,4 +23,4 @@
 
 ## コーディング規約
 
-- ~/.claude/rules/zig.md を参照すること。
+- `.claude/rules/zig.md` を参照すること。

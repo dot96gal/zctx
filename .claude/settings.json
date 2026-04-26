@@ -20,6 +20,11 @@
           },
           {
             "type": "command",
+            "command": "bash .claude/hooks/post_tool_use_lint.sh",
+            "statusMessage": "リント実行中..."
+          },
+          {
+            "type": "command",
             "command": "bash .claude/hooks/post_tool_use_test.sh",
             "statusMessage": "テスト実行中..."
           }
