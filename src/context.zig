@@ -88,6 +88,7 @@ pub const OwnedContext = struct {
     context: Context,
 
     /// シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
+    /// `.valueCtx` の場合はキャンセル機構を持たないため何もしない。
     pub fn cancel(self: OwnedContext, io: std.Io) void {
         switch (self.context) {
             .background, .todo, .canceled => {},
@@ -507,6 +508,16 @@ test "withTypedValue: キーが違えばnullを返す" {
     const r = try withTypedValue(BACKGROUND, Key1, 42, std.testing.allocator);
     defer r.deinit(std.testing.io);
     try std.testing.expectEqual(@as(?u64, null), r.context.typedValue(Key2));
+}
+
+test "withTypedValue: cancelは何もしない（valueCtxはキャンセル機構を持たない）" {
+    const io = std.testing.io;
+    const Key = TypedKey(u32);
+    const r = try withTypedValue(BACKGROUND, Key, 42, std.testing.allocator);
+    defer r.deinit(io);
+    r.cancel(io);
+    try std.testing.expect(!r.context.done().isFired());
+    try std.testing.expectEqual(@as(?u32, 42), r.context.typedValue(Key));
 }
 
 test "Context.deadline: withDeadlineで設定した値を返す" {
