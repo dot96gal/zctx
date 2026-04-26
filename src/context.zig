@@ -170,6 +170,7 @@ const CancelState = struct {
         }
         self.cancelErr = reason;
         // children をスナップショットとして取り出し、ロック解放後に propagate する。
+        // propagate はロック外で行う必要があるため defer ではなく手動アンロックを使用する。
         // ロック保持中に子の cancelFn を呼ぶとロック保持時間が長くなるため。
         var children = self.children;
         self.children = .empty;
@@ -241,6 +242,8 @@ fn registerToState(io: std.Io, state: *CancelState, child: CancelState.CancelChi
     state.mutex.lockUncancelable(io);
     defer state.mutex.unlock(io);
     if (state.cancelErr) |cerr| {
+        // 子の追加とキャンセル判断をアトミックに保つためロック保持中に呼ぶ。
+        // 子は別の CancelState のロックを取るためデッドロックは生じない。
         child.propagate(io, cerr);
     } else {
         try state.children.append(state.allocator, child);
@@ -266,6 +269,7 @@ pub fn withCancel(io: std.Io, parent: Context, allocator: std.mem.Allocator) err
 fn timerWorker(ctx: *DeadlineCtx) void {
     const now = std.Io.Clock.Timestamp.now(ctx.io, .awake).raw.nanoseconds;
     const remaining = ctx.deadline.raw.nanoseconds - now;
+    // remaining が負またはゼロの場合（時計の後退・スレッド起動の遅延による race）も期限切れとして扱う。
     if (remaining > 0) {
         const waitNs: u64 = if (remaining > std.math.maxInt(u64))
             std.math.maxInt(u64)

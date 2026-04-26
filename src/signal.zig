@@ -53,6 +53,7 @@ pub const SignalSource = struct {
         while (!self.fired.isSet()) {
             const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
             if (nowNs >= deadlineTs.raw.nanoseconds) return false;
+            // Canceled はシステムレベルの割り込み通知。isFired() を再確認してループを続ける。
             self.fired.waitTimeout(io, timeout) catch |err| switch (err) {
                 error.Timeout, error.Canceled => {},
             };
