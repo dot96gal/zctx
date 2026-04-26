@@ -6,8 +6,8 @@ pub fn main(env: std.process.Init) !void {
     const allocator = env.gpa;
 
     var buf: [4096]u8 = undefined;
-    var file_writer = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
-    const stdout = &file_writer.interface;
+    var fileWriter = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
+    const stdout = &fileWriter.interface;
 
     // withCancel でキャンセル可能なコンテキストを作成する
     const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
