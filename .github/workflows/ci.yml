@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -17,17 +17,6 @@ jobs:
 
       - name: Check formatting
         run: mise run fmt-check
-
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install mise
-        uses: jdx/mise-action@v4
-
-      - name: Run lint
-        run: mise run lint
 
   build:
     runs-on: ubuntu-latest

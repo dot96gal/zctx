@@ -1,8 +1,8 @@
 # zctx
 
-[![docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/zctx/)
-[![ci](https://github.com/dot96gal/zctx/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/ci.yml)
-[![release](https://github.com/dot96gal/zctx/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/release.yml)
+[![API Docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/zctx/)
+[![CI](https://github.com/dot96gal/zctx/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/ci.yml)
+[![Release](https://github.com/dot96gal/zctx/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/release.yml)
 
 Go の `context` パッケージを Zig に移植したライブラリ。
 
@@ -223,6 +223,8 @@ defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
 
 - [mise](https://mise.jdx.dev/) — ツールバージョン管理
 - Zig 0.16.0 以上（`mise install` で自動インストール）
+- `zig-lint` — Zig 向けリントスクリプト（`~/.local/bin/` にインストール済み）
+- `zig-release` — バージョン更新・タグ付けスクリプト（`~/.local/bin/` にインストール済み）
 
 ### セットアップ
 
