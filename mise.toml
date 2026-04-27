@@ -12,7 +12,7 @@ run = "zig fmt --check src/"
 
 [tasks.lint]
 description = "lint"
-run = "bash scripts/lint.sh"
+run = "zig-lint"
 
 [tasks.build]
 description = "build"
@@ -58,4 +58,4 @@ run = "npx --yes serve zig-out/docs"
 
 [tasks.release]
 description = "bump version, commit, tag, and push"
-run = "bash scripts/release.sh $@"
+run = "zig-release $@"
