@@ -1,12 +1,18 @@
 # zctx
 
-[![API Docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/zctx/)
+[![docs](https://img.shields.io/badge/API%20Docs-GitHub%20Pages-blue)](https://dot96gal.github.io/zctx/)
 [![ci](https://github.com/dot96gal/zctx/actions/workflows/ci.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/ci.yml)
 [![release](https://github.com/dot96gal/zctx/actions/workflows/release.yml/badge.svg)](https://github.com/dot96gal/zctx/actions/workflows/release.yml)
 
-Go の `context` パッケージを Zig に移植したキャンセル伝播ライブラリ。
+Go の `context` パッケージを Zig に移植したライブラリ。
 
 > **注意:** このリポジトリは個人的な興味・学習を目的としたホビーライブラリです。設計上の判断はすべて作者が個人で行っており、事前の告知なく破壊的変更が加わることがあります。安定した API を前提としたい場合は、任意のコミットやタグ時点でフォークし、独自に管理されることをおすすめします。
+
+---
+
+## 要件
+
+- Zig 0.16.0 以上
 
 ---
 
@@ -216,7 +222,7 @@ defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
 ### 必要なツール
 
 - [mise](https://mise.jdx.dev/) — ツールバージョン管理
-- Zig 0.16.0（`mise install` で自動インストール）
+- Zig 0.16.0 以上（`mise install` で自動インストール）
 
 ### セットアップ
 
@@ -226,31 +232,30 @@ cd zctx
 mise install
 ```
 
-### タスク
+### タスク一覧
 
-```sh
-mise run fmt        # フォーマット
-mise run fmt-check  # フォーマットチェック
-mise run lint       # リント
-mise run build      # ビルド
-mise run test       # テスト
-
-mise run build-docs  # API ドキュメント生成（zig-out/docs/ に出力）
-mise run serve-docs  # API ドキュメントをローカルサーバーで配信
-
-mise run release X.Y.Z  # バージョン更新・コミット・タグ・プッシュを一括実行（例: 1.0.0）
-
-mise run example:basic        # withCancel の基本例
-mise run example:timeout      # withTimeout の例
-mise run example:deadline     # withDeadline の例
-mise run example:propagation  # 親→子キャンセル伝播の例
-mise run example:value        # TypedKey の例
-mise run example:multi_cancel # 複数キャンセル条件の合成例
-```
+| コマンド | 説明 |
+|---------|------|
+| `mise run fmt` | フォーマット |
+| `mise run fmt-check` | フォーマットチェック |
+| `mise run lint` | リント |
+| `mise run build` | ビルド |
+| `mise run test` | テスト |
+| `mise run build-docs` | API ドキュメント生成（zig-out/docs/ に出力） |
+| `mise run serve-docs` | API ドキュメントをローカルサーバーで配信 |
+| `mise run release X.Y.Z` | バージョン更新・コミット・タグ・プッシュを一括実行 |
+| `mise run example:basic` | withCancel の基本例 |
+| `mise run example:timeout` | withTimeout の例 |
+| `mise run example:deadline` | withDeadline の例 |
+| `mise run example:propagation` | 親→子キャンセル伝播の例 |
+| `mise run example:value` | TypedKey の例 |
+| `mise run example:multi_cancel` | 複数キャンセル条件の合成例 |
 
 ### ファイル構成
 
 ```
+build.zig          # ビルドスクリプト
+build.zig.zon      # パッケージメタデータ・依存関係定義
 src/
   root.zig         # 公開 API の再エクスポート
   signal.zig       # SignalSource / Signal の実装とテスト
