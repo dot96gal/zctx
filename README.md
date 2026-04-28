@@ -51,7 +51,135 @@ const zctx_mod = zctx_dep.module("zctx");
 exe.root_module.addImport("zctx", zctx_mod);
 ```
 
-### API 一覧
+### 使い方
+
+#### 基本的なキャンセル
+
+```zig
+const std = @import("std");
+const zctx = @import("zctx");
+
+pub fn main(env: std.process.Init) !void {
+    const io = env.io;
+    const allocator = env.gpa;
+
+    const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
+    defer cancelCtx.deinit(io);
+
+    const thread = try std.Thread.spawn(.{}, doWork, .{ cancelCtx.context, io });
+    defer thread.join();
+
+    std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake) catch {};
+    cancelCtx.cancel(io); // スレッドに中断を伝える
+    // defer の LIFO 順: thread.join() → cancelCtx.deinit(io) の順に実行される
+}
+
+fn doWork(ctx: zctx.Context, io: std.Io) void {
+    while (ctx.err(io) == null) {
+        std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
+    }
+    std.debug.print("canceled: {?}\n", .{ctx.err(io)});
+}
+```
+
+#### タイムアウト
+
+```zig
+const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 5 * std.time.ns_per_s, allocator);
+defer timeoutCtx.deinit(io);
+
+// タイムアウトまで待機
+timeoutCtx.context.done().wait(io);
+std.debug.print("err: {?}\n", .{timeoutCtx.context.err(io)}); // error.DeadlineExceeded
+```
+
+#### デッドライン
+
+```zig
+const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + 5 * std.time.ns_per_s }, .clock = .awake };
+const deadlineCtx = try zctx.withDeadline(io, zctx.BACKGROUND, dl, allocator);
+defer deadlineCtx.deinit(io);
+
+// デッドラインまで待機
+deadlineCtx.context.done().wait(io);
+std.debug.print("err: {?}\n", .{deadlineCtx.context.err(io)}); // error.DeadlineExceeded
+```
+
+#### 親→子キャンセル伝播
+
+```zig
+const parent = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
+defer parent.deinit(io);
+
+const child = try zctx.withCancel(io, parent.context, allocator);
+defer child.deinit(io);
+
+parent.cancel(io); // child にも自動で伝播する
+std.debug.print("child err: {?}\n", .{child.context.err(io)}); // error.Canceled
+```
+
+#### 型安全な値の受け渡し
+
+```zig
+// キーを型ごとに定義する（ファイルスコープで宣言することを推奨）
+const RequestIdKey = zctx.TypedKey(u64);
+const UserNameKey  = zctx.TypedKey([]const u8);
+
+const ctx1 = try zctx.withTypedValue(zctx.BACKGROUND, RequestIdKey, 42, allocator);
+defer ctx1.deinit(io);
+
+const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocator);
+defer ctx2.deinit(io);
+
+// 子コンテキストから祖先の値を取り出せる
+const reqId    = ctx2.context.typedValue(RequestIdKey); // ?u64 → 42
+const userName = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alice"
+```
+
+#### 複数キャンセル条件の合成
+
+タイムアウトと手動キャンセルを組み合わせる場合、親コンテキストを利用する。
+いずれか先にキャンセルされた方が子コンテキストに伝播する。
+
+```zig
+// タイムアウト付き親コンテキスト（200ms）
+const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 200 * std.time.ns_per_ms, allocator);
+defer timeoutCtx.deinit(io);
+
+// 手動キャンセル可能な子コンテキスト → タイムアウト OR 手動キャンセルで終了
+const workCtx = try zctx.withCancel(io, timeoutCtx.context, allocator);
+defer workCtx.deinit(io);
+
+workCtx.context.done().wait(io);
+std.debug.print("err: {?}\n", .{workCtx.context.err(io)});
+```
+
+#### エラーハンドリング
+
+```zig
+fn handleRequest(ctx: zctx.Context, io: std.Io) !void {
+    if (ctx.err(io)) |e| return e; // error.Canceled / error.DeadlineExceeded を伝播
+
+    // ... 処理 ...
+}
+```
+
+#### `defer` の順序に注意
+
+`OwnedContext.deinit(io)` はコンテキストのメモリを解放する。複数スレッドがコンテキストを
+参照している場合、全スレッドが参照を終えてから `deinit(io)` を呼ぶこと。
+`defer` の LIFO 順を活用して `deinit` を `join` より先に宣言する。
+
+```zig
+const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
+defer cancelCtx.deinit(io); // 宣言順: 1番目 → 実行順: 2番目（後）
+
+const t = try std.Thread.spawn(.{}, worker, .{cancelCtx.context});
+defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
+```
+
+### API リファレンス
 
 詳細なシグネチャ・型情報は [API ドキュメント](https://dot96gal.github.io/zctx/) を参照。
 
@@ -89,142 +217,17 @@ signal.wait(io)                    // void — 発火するまでブロックす
 signal.waitTimeout(io, timeoutNs)  // bool — 発火=true / タイムアウト=false
 ```
 
-### 基本的なキャンセル
-
-```zig
-const std = @import("std");
-const zctx = @import("zctx");
-
-pub fn main(env: std.process.Init) !void {
-    const io = env.io;
-    const allocator = env.gpa;
-
-    const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-    defer cancelCtx.deinit(io);
-
-    const thread = try std.Thread.spawn(.{}, doWork, .{ cancelCtx.context, io });
-    defer thread.join();
-
-    std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake) catch {};
-    cancelCtx.cancel(io); // スレッドに中断を伝える
-    // defer の LIFO 順: thread.join() → cancelCtx.deinit(io) の順に実行される
-}
-
-fn doWork(ctx: zctx.Context, io: std.Io) void {
-    while (ctx.err(io) == null) {
-        std.Io.sleep(io, .{ .nanoseconds = 10 * std.time.ns_per_ms }, .awake) catch {};
-    }
-    std.debug.print("canceled: {?}\n", .{ctx.err(io)});
-}
-```
-
-### タイムアウト
-
-```zig
-const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 5 * std.time.ns_per_s, allocator);
-defer timeoutCtx.deinit(io);
-
-// タイムアウトまで待機
-timeoutCtx.context.done().wait(io);
-std.debug.print("err: {?}\n", .{timeoutCtx.context.err(io)}); // error.DeadlineExceeded
-```
-
-### デッドライン
-
-```zig
-const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
-const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + 5 * std.time.ns_per_s }, .clock = .awake };
-const deadlineCtx = try zctx.withDeadline(io, zctx.BACKGROUND, dl, allocator);
-defer deadlineCtx.deinit(io);
-
-// デッドラインまで待機
-deadlineCtx.context.done().wait(io);
-std.debug.print("err: {?}\n", .{deadlineCtx.context.err(io)}); // error.DeadlineExceeded
-```
-
-### 親→子キャンセル伝播
-
-```zig
-const parent = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-defer parent.deinit(io);
-
-const child = try zctx.withCancel(io, parent.context, allocator);
-defer child.deinit(io);
-
-parent.cancel(io); // child にも自動で伝播する
-std.debug.print("child err: {?}\n", .{child.context.err(io)}); // error.Canceled
-```
-
-### 型安全な値の受け渡し
-
-```zig
-// キーを型ごとに定義する（ファイルスコープで宣言することを推奨）
-const RequestIdKey = zctx.TypedKey(u64);
-const UserNameKey  = zctx.TypedKey([]const u8);
-
-const ctx1 = try zctx.withTypedValue(zctx.BACKGROUND, RequestIdKey, 42, allocator);
-defer ctx1.deinit(io);
-
-const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocator);
-defer ctx2.deinit(io);
-
-// 子コンテキストから祖先の値を取り出せる
-const reqId    = ctx2.context.typedValue(RequestIdKey); // ?u64 → 42
-const userName = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alice"
-```
-
-### 複数キャンセル条件の合成
-
-タイムアウトと手動キャンセルを組み合わせる場合、親コンテキストを利用する。
-いずれか先にキャンセルされた方が子コンテキストに伝播する。
-
-```zig
-// タイムアウト付き親コンテキスト（200ms）
-const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 200 * std.time.ns_per_ms, allocator);
-defer timeoutCtx.deinit(io);
-
-// 手動キャンセル可能な子コンテキスト → タイムアウト OR 手動キャンセルで終了
-const workCtx = try zctx.withCancel(io, timeoutCtx.context, allocator);
-defer workCtx.deinit(io);
-
-workCtx.context.done().wait(io);
-std.debug.print("err: {?}\n", .{workCtx.context.err(io)});
-```
-
-### エラーハンドリング
-
-```zig
-fn handleRequest(ctx: zctx.Context, io: std.Io) !void {
-    if (ctx.err(io)) |e| return e; // error.Canceled / error.DeadlineExceeded を伝播
-
-    // ... 処理 ...
-}
-```
-
-### `defer` の順序に注意
-
-`OwnedContext.deinit(io)` はコンテキストのメモリを解放する。複数スレッドがコンテキストを
-参照している場合、全スレッドが参照を終えてから `deinit(io)` を呼ぶこと。
-`defer` の LIFO 順を活用して `deinit` を `join` より先に宣言する。
-
-```zig
-const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-defer cancelCtx.deinit(io); // 宣言順: 1番目 → 実行順: 2番目（後）
-
-const t = try std.Thread.spawn(.{}, worker, .{cancelCtx.context});
-defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
-```
-
 ---
 
 ## 開発者向け
 
 ### 必要なツール
 
-- [mise](https://mise.jdx.dev/) — ツールバージョン管理
-- Zig 0.16.0 以上（`mise install` で自動インストール）
-- `zig-lint` — Zig 向けリントスクリプト（`~/.local/bin/` にインストール済み）
-- `zig-release` — バージョン更新・タグ付けスクリプト（`~/.local/bin/` にインストール済み）
+| ツール | 説明 |
+|-------|------|
+| [mise](https://mise.jdx.dev/) | ツールバージョン管理（Zig・zls を自動インストール） |
+| `zig-lint` | Zig 簡易リントスクリプト（`~/.local/bin/` にインストール済み） |
+| `zig-release` | バージョン更新・タグ付けスクリプト（`~/.local/bin/` にインストール済み） |
 
 ### セットアップ
 
@@ -271,7 +274,7 @@ example/
   multi_cancel.zig # 親コンテキストで複数キャンセル条件を合成
 ```
 
-### アーキテクチャ
+### 設計方針
 
 #### Context はタグ付き共用体
 
