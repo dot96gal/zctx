@@ -63,15 +63,15 @@ pub fn main(env: std.process.Init) !void {
     const io = env.io;
     const allocator = env.gpa;
 
-    const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-    defer cancelCtx.deinit(io);
+    const cancelCtx = try zctx.withCancel(allocator, io, zctx.background);
+    defer cancelCtx.deinit(allocator, io);
 
     const thread = try std.Thread.spawn(.{}, doWork, .{ cancelCtx.context, io });
     defer thread.join();
 
     std.Io.sleep(io, .{ .nanoseconds = 100 * std.time.ns_per_ms }, .awake) catch {};
     cancelCtx.cancel(io); // スレッドに中断を伝える
-    // defer の LIFO 順: thread.join() → cancelCtx.deinit(io) の順に実行される
+    // defer の LIFO 順: thread.join() → cancelCtx.deinit(allocator, io) の順に実行される
 }
 
 fn doWork(ctx: zctx.Context, io: std.Io) void {
@@ -85,8 +85,11 @@ fn doWork(ctx: zctx.Context, io: std.Io) void {
 #### タイムアウト
 
 ```zig
-const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 5 * std.time.ns_per_s, allocator);
-defer timeoutCtx.deinit(io);
+const timeoutCtx = try zctx.withTimeout(
+    allocator, io, zctx.background,
+    .{ .raw = .{ .nanoseconds = 5 * std.time.ns_per_s }, .clock = .awake },
+);
+defer timeoutCtx.deinit(allocator, io);
 
 // タイムアウトまで待機
 timeoutCtx.context.done().wait(io);
@@ -98,8 +101,8 @@ std.debug.print("err: {?}\n", .{timeoutCtx.context.err(io)}); // error.DeadlineE
 ```zig
 const nowNs = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = nowNs + 5 * std.time.ns_per_s }, .clock = .awake };
-const deadlineCtx = try zctx.withDeadline(io, zctx.BACKGROUND, dl, allocator);
-defer deadlineCtx.deinit(io);
+const deadlineCtx = try zctx.withDeadline(allocator, io, zctx.background, dl);
+defer deadlineCtx.deinit(allocator, io);
 
 // デッドラインまで待機
 deadlineCtx.context.done().wait(io);
@@ -109,11 +112,11 @@ std.debug.print("err: {?}\n", .{deadlineCtx.context.err(io)}); // error.Deadline
 #### 親→子キャンセル伝播
 
 ```zig
-const parent = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-defer parent.deinit(io);
+const parent = try zctx.withCancel(allocator, io, zctx.background);
+defer parent.deinit(allocator, io);
 
-const child = try zctx.withCancel(io, parent.context, allocator);
-defer child.deinit(io);
+const child = try zctx.withCancel(allocator, io, parent.context);
+defer child.deinit(allocator, io);
 
 parent.cancel(io); // child にも自動で伝播する
 std.debug.print("child err: {?}\n", .{child.context.err(io)}); // error.Canceled
@@ -126,11 +129,11 @@ std.debug.print("child err: {?}\n", .{child.context.err(io)}); // error.Canceled
 const RequestIdKey = zctx.TypedKey(u64);
 const UserNameKey  = zctx.TypedKey([]const u8);
 
-const ctx1 = try zctx.withTypedValue(zctx.BACKGROUND, RequestIdKey, 42, allocator);
-defer ctx1.deinit(io);
+const ctx1 = try zctx.withTypedValue(allocator, zctx.background, RequestIdKey, 42);
+defer ctx1.deinit(allocator, io);
 
-const ctx2 = try zctx.withTypedValue(ctx1.context, UserNameKey, "alice", allocator);
-defer ctx2.deinit(io);
+const ctx2 = try zctx.withTypedValue(allocator, ctx1.context, UserNameKey, "alice");
+defer ctx2.deinit(allocator, io);
 
 // 子コンテキストから祖先の値を取り出せる
 const reqId    = ctx2.context.typedValue(RequestIdKey); // ?u64 → 42
@@ -144,12 +147,15 @@ const userName = ctx2.context.typedValue(UserNameKey);  // ?[]const u8 → "alic
 
 ```zig
 // タイムアウト付き親コンテキスト（200ms）
-const timeoutCtx = try zctx.withTimeout(io, zctx.BACKGROUND, 200 * std.time.ns_per_ms, allocator);
-defer timeoutCtx.deinit(io);
+const timeoutCtx = try zctx.withTimeout(
+    allocator, io, zctx.background,
+    .{ .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms }, .clock = .awake },
+);
+defer timeoutCtx.deinit(allocator, io);
 
 // 手動キャンセル可能な子コンテキスト → タイムアウト OR 手動キャンセルで終了
-const workCtx = try zctx.withCancel(io, timeoutCtx.context, allocator);
-defer workCtx.deinit(io);
+const workCtx = try zctx.withCancel(allocator, io, timeoutCtx.context);
+defer workCtx.deinit(allocator, io);
 
 workCtx.context.done().wait(io);
 std.debug.print("err: {?}\n", .{workCtx.context.err(io)});
@@ -167,13 +173,13 @@ fn handleRequest(ctx: zctx.Context, io: std.Io) !void {
 
 #### `defer` の順序に注意
 
-`OwnedContext.deinit(io)` はコンテキストのメモリを解放する。複数スレッドがコンテキストを
-参照している場合、全スレッドが参照を終えてから `deinit(io)` を呼ぶこと。
+`OwnedContext.deinit(allocator, io)` はコンテキストのメモリを解放する。複数スレッドがコンテキストを
+参照している場合、全スレッドが参照を終えてから `deinit(allocator, io)` を呼ぶこと。
 `defer` の LIFO 順を活用して `deinit` を `join` より先に宣言する。
 
 ```zig
-const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-defer cancelCtx.deinit(io); // 宣言順: 1番目 → 実行順: 2番目（後）
+const cancelCtx = try zctx.withCancel(allocator, io, zctx.background);
+defer cancelCtx.deinit(allocator, io); // 宣言順: 1番目 → 実行順: 2番目（後）
 
 const t = try std.Thread.spawn(.{}, worker, .{cancelCtx.context});
 defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
@@ -187,23 +193,23 @@ defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
 const zctx = @import("zctx");
 
 // ルートコンテキスト（アロケータ不要）
-zctx.BACKGROUND        // キャンセルされないルート
-zctx.TODO              // 未実装のプレースホルダー
-zctx.CANCELED          // 最初からキャンセル済み
+zctx.background        // キャンセルされないルート
+zctx.todo              // 未実装のプレースホルダー
+zctx.canceled          // 最初からキャンセル済み
 
 // 型安全キーの生成（comptime）
 zctx.TypedKey(comptime T: type) // type — withTypedValue / typedValue で使うキー型を生成する
 
 // 派生コンテキスト（返り値は OwnedContext）
-zctx.withCancel(io, parent, alloc)                                     // error{OutOfMemory}!OwnedContext
-zctx.withTimeout(io, parent, timeoutNs, alloc)                         // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
-zctx.withDeadline(io, parent, deadline: std.Io.Clock.Timestamp, alloc) // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
-zctx.withTypedValue(parent, Key, value, alloc)                         // error{OutOfMemory}!OwnedContext
+zctx.withCancel(alloc, io, parent)                                     // error{OutOfMemory}!OwnedContext
+zctx.withTimeout(alloc, io, parent, timeout: std.Io.Clock.Duration)    // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
+zctx.withDeadline(alloc, io, parent, deadline: std.Io.Clock.Timestamp) // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedContext
+zctx.withTypedValue(alloc, parent, Key, value)                         // error{OutOfMemory}!OwnedContext
 
 // OwnedContext のメソッド
-owned.context      // Context 値
-owned.cancel(io)   // シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
-owned.deinit(io)   // メモリを解放する。未キャンセルなら先にキャンセルしてから解放する。defer で必ず呼ぶ。
+owned.context             // Context 値
+owned.cancel(io)          // シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
+owned.deinit(alloc, io)   // メモリを解放する。未キャンセルなら先にキャンセルしてから解放する。defer で必ず呼ぶ。
 
 // Context のメソッド
 ctx.done()               // Signal（値型、fire() 不可）— isFired() / wait(io) で待機できる
@@ -214,7 +220,7 @@ ctx.typedValue(Key)      // ?Key.Value  — キーに対応する値を型安全
 // Signal のメソッド（fire() は呼べない）
 signal.isFired()                   // bool — 発火状態をノンブロッキングで確認する。
 signal.wait(io)                    // void — 発火するまでブロックする。
-signal.waitTimeout(io, timeoutNs)  // bool — 発火=true / タイムアウト=false
+signal.waitTimeout(io, timeout: std.Io.Clock.Duration)  // bool — 発火=true / タイムアウト=false
 ```
 
 ---
@@ -246,6 +252,8 @@ mise install
 | `mise run lint` | リント |
 | `mise run build` | ビルド |
 | `mise run test` | テスト |
+| `mise run build-coverage` | カバレッジレポート生成（zig-out/coverage/ に出力） |
+| `mise run serve-coverage` | カバレッジレポートをローカルサーバーで配信 |
 | `mise run build-docs` | API ドキュメント生成（zig-out/docs/ に出力） |
 | `mise run serve-docs` | API ドキュメントをローカルサーバーで配信 |
 | `mise run release X.Y.Z` | バージョン更新・コミット・タグ・プッシュを一括実行 |
@@ -262,7 +270,7 @@ mise install
 build.zig          # ビルドスクリプト
 build.zig.zon      # パッケージメタデータ・依存関係定義
 src/
-  root.zig         # 公開 API の再エクスポート
+  zctx.zig         # 公開 API の再エクスポート
   signal.zig       # SignalSource / Signal の実装とテスト
   context.zig      # Context / withCancel / withTimeout / withDeadline / withTypedValue の実装とテスト
 example/
@@ -287,9 +295,9 @@ pub const Context = union(enum) {
     background,
     todo,
     canceled,
-    cancel:      *CancelCtx,
-    deadlineCtx: *DeadlineCtx,
-    valueCtx:    *ValueCtx,
+    cancel_ctx:   *CancelCtx,
+    deadline_ctx: *DeadlineCtx,
+    value_ctx:    *ValueCtx,
     // ...
 };
 ```
@@ -299,12 +307,14 @@ pub const Context = union(enum) {
 `SignalSource` は `fired`（`std.Io.Event`）のみで動作する内部型。`fire()` で一度だけ発火し、
 複数のウェイターに一斉通知する。Go の `chan struct{}` を閉じる操作に相当する。
 
-`Signal` は `SignalSource` への参照を持つ公開ラッパー型。`fire()` を持たないため、
+`Signal` は `Context.done()` が返す公開ラッパー型。`fire()` を持たないため、
 `Context.done()` の呼び出し元が誤ってキャンセルを発火することをコンパイル時に防ぐ。
+`background`・`todo` は永遠に発火しないバリアント、`canceled` は発火済みバリアントとして実装され、
+`cancel_ctx`・`deadline_ctx` は内部の `SignalSource` への参照を保持する。
 
 #### キャンセルと解放の分離
 
-`OwnedContext.cancel(io)` はシグナルのみ発火し、`deinit(io)` がメモリを解放する。これにより
+`OwnedContext.cancel(io)` はシグナルのみ発火し、`deinit(alloc, io)` がメモリを解放する。これにより
 キャンセル後も `ctx.err(io)` などの読み取りが安全に行える。
 
 #### 親→子伝播の TOCTOU 防止

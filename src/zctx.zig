@@ -1,14 +1,14 @@
 //! zctx: Go の context パッケージを Zig に移植したキャンセル伝播ライブラリ。
 
+pub const background = @import("context.zig").background;
+pub const todo = @import("context.zig").todo;
+pub const canceled = @import("context.zig").canceled;
+
 pub const Signal = @import("signal.zig").Signal;
 pub const Context = @import("context.zig").Context;
 pub const ContextError = @import("context.zig").ContextError;
 pub const OwnedContext = @import("context.zig").OwnedContext;
 pub const TypedKey = @import("context.zig").TypedKey;
-
-pub const BACKGROUND = @import("context.zig").BACKGROUND;
-pub const TODO = @import("context.zig").TODO;
-pub const CANCELED = @import("context.zig").CANCELED;
 
 pub const withCancel = @import("context.zig").withCancel;
 pub const withTimeout = @import("context.zig").withTimeout;

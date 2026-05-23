@@ -2,4 +2,4 @@
 zig-out/
 *.o
 .claude/settings.local.json
-
+.claude/plans/*

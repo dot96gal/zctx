@@ -6,20 +6,20 @@ pub fn main(env: std.process.Init) !void {
     const allocator = env.gpa;
 
     var buf: [4096]u8 = undefined;
-    var fileWriter = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
-    const stdout = &fileWriter.interface;
+    var file_writer = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
+    const stdout = &file_writer.interface;
 
     // withCancel でキャンセル可能なコンテキストを作成する
-    const cancelCtx = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-    defer cancelCtx.deinit(io);
+    const cancel_ctx = try zctx.withCancel(allocator, io, zctx.background);
+    defer cancel_ctx.deinit(allocator, io);
 
     try stdout.print("=== basic: withCancel ===\n", .{});
-    try stdout.print("err before cancel: {?}\n", .{cancelCtx.context.err(io)});
-    try stdout.print("done fired before cancel: {}\n", .{cancelCtx.context.done().isFired()});
+    try stdout.print("err before cancel: {?}\n", .{cancel_ctx.context.err(io)});
+    try stdout.print("done fired before cancel: {}\n", .{cancel_ctx.context.done().isFired()});
 
-    cancelCtx.cancel(io);
+    cancel_ctx.cancel(io);
 
-    try stdout.print("err after cancel:  {?}\n", .{cancelCtx.context.err(io)});
-    try stdout.print("done fired after cancel:  {}\n", .{cancelCtx.context.done().isFired()});
+    try stdout.print("err after cancel:  {?}\n", .{cancel_ctx.context.err(io)});
+    try stdout.print("done fired after cancel:  {}\n", .{cancel_ctx.context.done().isFired()});
     try stdout.flush();
 }

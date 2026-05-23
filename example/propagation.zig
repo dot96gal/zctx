@@ -6,18 +6,18 @@ pub fn main(env: std.process.Init) !void {
     const allocator = env.gpa;
 
     var buf: [4096]u8 = undefined;
-    var fileWriter = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
-    const stdout = &fileWriter.interface;
+    var file_writer = std.Io.File.Writer.initStreaming(std.Io.File.stdout(), io, &buf);
+    const stdout = &file_writer.interface;
 
     try stdout.print("=== propagation: 親のキャンセルが子に伝播する ===\n", .{});
 
     // 親コンテキストを作成する
-    const parent = try zctx.withCancel(io, zctx.BACKGROUND, allocator);
-    defer parent.deinit(io);
+    const parent = try zctx.withCancel(allocator, io, zctx.background);
+    defer parent.deinit(allocator, io);
 
     // 子コンテキストを親から派生させる
-    const child = try zctx.withCancel(io, parent.context, allocator);
-    defer child.deinit(io);
+    const child = try zctx.withCancel(allocator, io, parent.context);
+    defer child.deinit(allocator, io);
 
     try stdout.print("parent err before cancel: {?}\n", .{parent.context.err(io)});
     try stdout.print("child  err before cancel: {?}\n", .{child.context.err(io)});

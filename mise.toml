@@ -47,6 +47,15 @@ run = "zig build run-example-value --summary all"
 description = "run example/multi_cancel.zig"
 run = "zig build run-example-multi_cancel --summary all"
 
+[tasks.build-coverage]
+description = "build coverage report"
+run = "zig-coverage --output=zig-out/coverage"
+
+[tasks."serve-coverage"]
+description = "serve coverage report"
+depends = ["build-coverage"]
+run = "npx --yes http-server zig-out/coverage"
+
 [tasks.build-docs]
 description = "build API documentation"
 run = "zig build docs --summary all"
