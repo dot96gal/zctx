@@ -11,6 +11,10 @@ pub const Signal = struct {
         };
     }
 
+    /// キャンセルシグナルが発火するまでブロックする。
+    /// `background`/`todo` の `done()` から得た Signal（`never_fires`）に対して呼び出してはならない。
+    /// これらのコンテキストはキャンセルされないため、永遠にブロックされる意味論になる。
+    /// 呼び出す前に `isFired()` または `waitTimeout()` で発火を確認すること。
     pub fn wait(self: Signal, io: std.Io) void {
         switch (self.inner) {
             .never_fires => @panic("Signal.wait: cannot wait on done() of background/todo context"),

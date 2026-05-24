@@ -25,7 +25,8 @@ pub fn main(env: std.process.Init) !void {
     // 親をキャンセルすると子にも伝播する
     parent.cancel(io);
 
-    // 子の done シグナルが発火するまで少し待つ（スレッド伝播があるため）
+    // 親の cancel() は同期的に子へ伝播するため、この時点で子はすでに done 状態になっている。
+    // done().wait() は発火済みシグナルに対して即座に返る。
     child.context().done().wait(io);
 
     try stdout.print("parent err after cancel:  {?}\n", .{parent.context().err(io)});

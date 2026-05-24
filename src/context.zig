@@ -62,7 +62,7 @@ pub const Context = union(enum) {
         return @as(*Key.Value, @ptrCast(@alignCast(raw))).*;
     }
 
-    pub fn rawValue(ctx: Context, key: *const anyopaque) ?*anyopaque {
+    fn rawValue(ctx: Context, key: *const anyopaque) ?*anyopaque {
         return switch (ctx) {
             .background, .todo => null,
             .canceled => null,
