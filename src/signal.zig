@@ -13,10 +13,7 @@ pub const Signal = struct {
 
     pub fn wait(self: Signal, io: std.Io) void {
         switch (self.inner) {
-            .never_fires => {
-                var event: std.Io.Event = .unset;
-                event.waitUncancelable(io);
-            },
+            .never_fires => @panic("Signal.wait: cannot wait on done() of background/todo context"),
             .already_fired => {},
             .source => |s| s.waitUncancelable(io),
         }
@@ -90,15 +87,18 @@ const SignalInner = union(enum) {
 // --- Signal.isFired ---
 
 test "Signal.isFired: 初期状態はfalse" {
-    var src = SignalSource{};
-    try std.testing.expect(!src.signal().isFired());
+    var source = SignalSource{};
+
+    try std.testing.expect(!source.signal().isFired());
 }
 
 test "Signal.isFired: fire後はtrue" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    try std.testing.expect(src.signal().isFired());
+
+    var source = SignalSource{};
+    source.fire(io);
+
+    try std.testing.expect(source.signal().isFired());
 }
 
 test "Signal.isFired: never_fires/already_firedは固定状態を返す" {
@@ -113,6 +113,7 @@ test "Signal.isFired: never_fires/already_firedは固定状態を返す" {
 
     for (test_cases) |tc| {
         errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
         try std.testing.expectEqual(tc.expected, tc.input.isFired());
     }
 }
@@ -121,28 +122,33 @@ test "Signal.isFired: never_fires/already_firedは固定状態を返す" {
 
 test "Signal.wait: 発火済みなら即座に返る" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    src.signal().wait(io);
+
+    var source = SignalSource{};
+    source.fire(io);
+
+    source.signal().wait(io);
 }
 
 test "Signal.wait: 別スレッドからのfireでwaitが起きる" {
     const io = std.testing.io;
-    var src = SignalSource{};
+
+    var source = SignalSource{};
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(s: *SignalSource, tio: std.Io) void {
             std.Io.sleep(tio, .{ .nanoseconds = 1 * std.time.ns_per_ms }, .awake) catch
                 @panic("sleep failed");
             s.fire(tio);
         }
-    }.run, .{ &src, io });
-    src.signal().wait(io);
+    }.run, .{ &source, io });
+    source.signal().wait(io);
     thread.join();
-    try std.testing.expect(src.isFired());
+
+    try std.testing.expect(source.isFired());
 }
 
 test "Signal.wait: already_firedは即座に返る" {
     const io = std.testing.io;
+
     const sig = Signal{ .inner = .already_fired };
     sig.wait(io);
 }
@@ -151,9 +157,11 @@ test "Signal.wait: already_firedは即座に返る" {
 
 test "Signal.waitTimeout: 発火済みならtrueを返す" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    try std.testing.expect(src.signal().waitTimeout(
+
+    var source = SignalSource{};
+    source.fire(io);
+
+    try std.testing.expect(source.signal().waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 1 * std.time.ns_per_s }, .clock = .awake },
     ));
@@ -161,8 +169,9 @@ test "Signal.waitTimeout: 発火済みならtrueを返す" {
 
 test "Signal.waitTimeout: タイムアウトしたらfalse" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    try std.testing.expect(!src.signal().waitTimeout(
+
+    var source = SignalSource{};
+    try std.testing.expect(!source.signal().waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
     ));
@@ -170,6 +179,7 @@ test "Signal.waitTimeout: タイムアウトしたらfalse" {
 
 test "Signal.waitTimeout: never_fires/already_firedは固定状態を返す" {
     const io = std.testing.io;
+
     const test_cases = [_]struct {
         name: []const u8,
         input: Signal,
@@ -181,6 +191,7 @@ test "Signal.waitTimeout: never_fires/already_firedは固定状態を返す" {
 
     for (test_cases) |tc| {
         errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
+
         try std.testing.expectEqual(tc.expected, tc.input.waitTimeout(
             io,
             .{ .raw = .{ .nanoseconds = 1 * std.time.ns_per_s }, .clock = .awake },
@@ -192,64 +203,75 @@ test "Signal.waitTimeout: never_fires/already_firedは固定状態を返す" {
 
 test "SignalSource.fire: 発火後はisFiredがtrue" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    try std.testing.expect(src.isFired());
+
+    var source = SignalSource{};
+    source.fire(io);
+
+    try std.testing.expect(source.isFired());
 }
 
 test "SignalSource.fire: 冪等" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    src.fire(io);
-    try std.testing.expect(src.isFired());
+
+    var source = SignalSource{};
+    source.fire(io);
+    source.fire(io);
+
+    try std.testing.expect(source.isFired());
 }
 
 // --- SignalSource.waitTimeout ---
 
 test "SignalSource.waitTimeout: タイムアウト前に発火したらtrue" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    const fired = src.waitTimeout(
+
+    var source = SignalSource{};
+    source.fire(io);
+    const fired = source.waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 1 * std.time.ns_per_s }, .clock = .awake },
     );
+
     try std.testing.expect(fired);
 }
 
 test "SignalSource.waitTimeout: タイムアウトしたらfalse" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    const fired = src.waitTimeout(
+
+    var source = SignalSource{};
+    const fired = source.waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 1 }, .clock = .awake },
     );
+
     try std.testing.expect(!fired);
 }
 
 test "SignalSource.waitTimeout: 別スレッドのfireで早期リターンしtrueを返す" {
     const io = std.testing.io;
-    var src = SignalSource{};
+
+    var source = SignalSource{};
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(s: *SignalSource, tio: std.Io) void {
             std.Io.sleep(tio, .{ .nanoseconds = 1 * std.time.ns_per_ms }, .awake) catch
                 @panic("sleep failed");
             s.fire(tio);
         }
-    }.run, .{ &src, io });
-    const fired = src.waitTimeout(
+    }.run, .{ &source, io });
+    const fired = source.waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 1 * std.time.ns_per_s }, .clock = .awake },
     );
     thread.join();
+
     try std.testing.expect(fired);
 }
 
 test "SignalSource.waitTimeout: 非正のDurationは即座にfalse" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    try std.testing.expect(!src.waitTimeout(
+
+    var source = SignalSource{};
+    try std.testing.expect(!source.waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
     ));
@@ -258,65 +280,76 @@ test "SignalSource.waitTimeout: 非正のDurationは即座にfalse" {
 // --- SignalSource.signal ---
 
 test "SignalSource.signal: Signalを返す" {
-    var src = SignalSource{};
-    const sig = src.signal();
+    var source = SignalSource{};
+    const sig = source.signal();
+
     try std.testing.expect(!sig.isFired());
 }
 
 // --- SignalSource.isFired ---
 
 test "SignalSource.isFired: 初期状態はfalse" {
-    var src = SignalSource{};
-    try std.testing.expect(!src.isFired());
+    var source = SignalSource{};
+
+    try std.testing.expect(!source.isFired());
 }
 
 test "SignalSource.isFired: fire後はtrue" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    try std.testing.expect(src.isFired());
+
+    var source = SignalSource{};
+    source.fire(io);
+
+    try std.testing.expect(source.isFired());
 }
 
 // --- SignalSource.waitOnce ---
 
 test "SignalSource.waitOnce: deadlineを過ぎたらdeadline_exceededを返す" {
     const io = std.testing.io;
-    var src = SignalSource{};
+
+    var source = SignalSource{};
     const deadline_ts: std.Io.Clock.Timestamp = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake };
-    try std.testing.expectEqual(.deadline_exceeded, try src.waitOnce(io, deadline_ts));
+
+    try std.testing.expectEqual(.deadline_exceeded, try source.waitOnce(io, deadline_ts));
 }
 
 test "SignalSource.waitOnce: deadline前はwithin_deadlineを返す" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
+
+    var source = SignalSource{};
+    source.fire(io);
     const deadline_ts = std.Io.Clock.Timestamp.fromNow(
         io,
         .{ .raw = .{ .nanoseconds = 10 * std.time.ns_per_ms }, .clock = .awake },
     );
-    try std.testing.expectEqual(.within_deadline, try src.waitOnce(io, deadline_ts));
+
+    try std.testing.expectEqual(.within_deadline, try source.waitOnce(io, deadline_ts));
 }
 
 // --- SignalSource.waitUncancelable ---
 
 test "SignalSource.waitUncancelable: 発火済みなら即座に返る" {
     const io = std.testing.io;
-    var src = SignalSource{};
-    src.fire(io);
-    src.waitUncancelable(io);
+
+    var source = SignalSource{};
+    source.fire(io);
+    source.waitUncancelable(io);
 }
 
 test "SignalSource.waitUncancelable: 別スレッドからのfireでwaitが起きる" {
     const io = std.testing.io;
-    var src = SignalSource{};
+
+    var source = SignalSource{};
     const thread = try std.Thread.spawn(.{}, struct {
         fn run(s: *SignalSource, tio: std.Io) void {
             std.Io.sleep(tio, .{ .nanoseconds = 1 * std.time.ns_per_ms }, .awake) catch
                 @panic("sleep failed");
             s.fire(tio);
         }
-    }.run, .{ &src, io });
-    src.waitUncancelable(io);
+    }.run, .{ &source, io });
+    source.waitUncancelable(io);
     thread.join();
-    try std.testing.expect(src.isFired());
+
+    try std.testing.expect(source.isFired());
 }

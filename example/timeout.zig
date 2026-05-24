@@ -12,19 +12,19 @@ pub fn main(env: std.process.Init) !void {
     try stdout.print("=== timeout: withTimeout ===\n", .{});
 
     // 100ms のタイムアウトを設定する
-    const timeout_ctx = try zctx.withTimeout(
+    const timeout_scope = try zctx.withTimeout(
         allocator,
         io,
         zctx.background,
         .{ .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms }, .clock = .awake },
     );
-    defer timeout_ctx.deinit(allocator, io);
+    defer timeout_scope.deinit(allocator, io);
 
-    try stdout.print("err before timeout: {?}\n", .{timeout_ctx.context.err(io)});
+    try stdout.print("err before timeout: {?}\n", .{timeout_scope.context().err(io)});
 
     // タイムアウトまで待機する
-    timeout_ctx.context.done().wait(io);
+    timeout_scope.context().done().wait(io);
 
-    try stdout.print("err after timeout:  {?}\n", .{timeout_ctx.context.err(io)});
+    try stdout.print("err after timeout:  {?}\n", .{timeout_scope.context().err(io)});
     try stdout.flush();
 }

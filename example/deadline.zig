@@ -17,14 +17,14 @@ pub fn main(env: std.process.Init) !void {
         .raw = .{ .nanoseconds = now_ns + 100 * std.time.ns_per_ms },
         .clock = .awake,
     };
-    const deadline_ctx = try zctx.withDeadline(allocator, io, zctx.background, dl);
-    defer deadline_ctx.deinit(allocator, io);
+    const deadline_scope = try zctx.withDeadline(allocator, io, zctx.background, dl);
+    defer deadline_scope.deinit(allocator, io);
 
-    try stdout.print("err before deadline: {?}\n", .{deadline_ctx.context.err(io)});
+    try stdout.print("err before deadline: {?}\n", .{deadline_scope.context().err(io)});
 
     // デッドラインまで待機する
-    deadline_ctx.context.done().wait(io);
+    deadline_scope.context().done().wait(io);
 
-    try stdout.print("err after deadline:  {?}\n", .{deadline_ctx.context.err(io)});
+    try stdout.print("err after deadline:  {?}\n", .{deadline_scope.context().err(io)});
     try stdout.flush();
 }
