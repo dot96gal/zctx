@@ -64,8 +64,7 @@ pub const Context = union(enum) {
 
     fn rawValue(ctx: Context, key: *const anyopaque) ?*anyopaque {
         return switch (ctx) {
-            .background, .todo => null,
-            .canceled => null,
+            .background, .todo, .canceled => null,
             .cancel_ctx => |c| c.parent.rawValue(key),
             .deadline_ctx => |d| d.parent.rawValue(key),
             .value_ctx => |v| if (v.key == key) v.val else v.parent.rawValue(key),
@@ -105,8 +104,8 @@ pub const CancelState = struct {
     }
 
     // ロック戦略: acquireCancelLock でロック解放後に propagateChildren を呼ぶ。
-    // 子の cancel は子自身の mutex を取得するため、親の mutex 保持中に呼ぶとデッドロックになる。
-    // registerToState はキャンセル済み時のみロック保持中に propagate を呼ぶ。
+    // 子の cancel は子自身の mutex を取得するため、親 CancelState の mutex 保持中に呼ぶとデッドロックになる。
+    // registerToState はキャンセル済み時のみ親 CancelState の mutex 保持中に propagate を呼ぶ。
     // 子の propagate が取るのは子自身の mutex であり、親の mutex を再取得しないため安全。
     pub fn cancel(self: *CancelState, io: std.Io, reason: ContextError) void {
         const items = self.acquireCancelLock(io, reason) orelse return;
@@ -147,7 +146,7 @@ pub const CancelState = struct {
             }
         }
 
-        @panic("unregister: child not found");
+        @panic("unregister: child not found — caller must pass a previously registered child");
     }
 };
 
@@ -157,6 +156,8 @@ pub const CancelCtx = struct {
     parent_cancel_state: ?*CancelState,
 
     pub fn deinit(self: *CancelCtx, allocator: std.mem.Allocator, io: std.Io) void {
+        // 親がキャンセル済みの場合、unregister は cancel_err を確認して早期リターンするため、
+        // children リストに self が存在しなくても @panic には到達しない。
         if (self.parent_cancel_state) |ps| ps.unregister(io, .{ .cancel_ctx = self });
 
         self.cancel_state.cancel(io, error.Canceled);
@@ -171,14 +172,11 @@ pub const DeadlineCtx = struct {
     cancel_state: CancelState,
     parent_cancel_state: ?*CancelState,
     deadline: std.Io.Clock.Timestamp,
-    timer_thread: ?std.Thread,
 
     pub fn deinit(self: *DeadlineCtx, allocator: std.mem.Allocator, io: std.Io) void {
         if (self.parent_cancel_state) |ps| ps.unregister(io, .{ .deadline_ctx = self });
 
         self.cancel_state.cancel(io, error.Canceled);
-
-        if (self.timer_thread) |t| t.join();
         self.cancel_state.deinit(allocator);
 
         allocator.destroy(self);
@@ -205,15 +203,6 @@ pub fn TypedKey(comptime T: type) type {
         var marker: u8 = 0;
         pub const key: *anyopaque = &marker;
     };
-}
-
-// --- canceled ---
-
-test "canceled: 即座にdone" {
-    const io = std.testing.io;
-
-    try std.testing.expectEqual(@as(?ContextError, error.Canceled), canceled.err(io));
-    try std.testing.expect(canceled.done().isFired());
 }
 
 // --- Context.done ---
@@ -262,7 +251,6 @@ test "Context.done: deadline_ctx はキャンセル後に発火する" {
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer ctx.cancel_state.deinit(std.testing.allocator);
@@ -358,7 +346,6 @@ test "Context.err: deadline_ctx はキャンセル後に DeadlineExceeded を返
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer ctx.cancel_state.deinit(std.testing.allocator);
@@ -434,7 +421,6 @@ test "Context.deadline: deadline_ctx は設定値を返す" {
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = dl,
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer ctx.cancel_state.deinit(std.testing.allocator);
@@ -454,7 +440,6 @@ test "Context.deadline: value_ctx は親の deadline を委譲する" {
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = dl,
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer parent_ctx.cancel_state.deinit(std.testing.allocator);
@@ -563,7 +548,32 @@ test "Context.rawValue: value_ctx でキーが一致すれば値を返す" {
     defer ctx.deinit(std.testing.allocator);
 
     const c: Context = .{ .value_ctx = ctx };
-    try std.testing.expect(c.rawValue(Key.key) != null);
+    const raw = c.rawValue(Key.key);
+    try std.testing.expect(raw != null);
+    try std.testing.expectEqual(@as(u32, 42), @as(*u32, @ptrCast(@alignCast(raw.?))).*);
+}
+
+test "Context.rawValue: value_ctx でキーが一致しない場合は親に委譲する" {
+    const Key1 = TypedKey(u32);
+    const Key2 = TypedKey(u64);
+
+    const val_ptr = try std.testing.allocator.create(u32);
+    val_ptr.* = 42;
+    const ctx = try std.testing.allocator.create(ValueCtx);
+    ctx.* = .{
+        .parent = background,
+        .key = Key1.key,
+        .val = val_ptr,
+        .val_deinit = struct {
+            fn impl(alloc: std.mem.Allocator, ptr: *anyopaque) void {
+                alloc.destroy(@as(*u32, @ptrCast(@alignCast(ptr))));
+            }
+        }.impl,
+    };
+    defer ctx.deinit(std.testing.allocator);
+
+    const c: Context = .{ .value_ctx = ctx };
+    try std.testing.expectEqual(@as(?*anyopaque, null), c.rawValue(Key2.key));
 }
 
 test "Context.rawValue: cancel_ctx は親に委譲する" {
@@ -617,7 +627,6 @@ test "Context.rawValue: deadline_ctx は親に委譲する" {
         .parent = .{ .value_ctx = value_ctx },
         .cancel_state = CancelState.init(),
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer deadline_ctx.cancel_state.deinit(std.testing.allocator);
@@ -654,7 +663,6 @@ test "CancelState.CancelChild.propagate: deadline_ctxブランチに伝播する
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer child_ctx.cancel_state.deinit(std.testing.allocator);
@@ -749,7 +757,6 @@ test "CancelState.cancel: deadline_ctx子コンテキストに伝播する" {
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer child.deinit(std.testing.allocator, io);
@@ -832,7 +839,6 @@ test "CancelState.propagateChildren: deadline_ctx子コンテキストに伝播�
         .parent = background,
         .cancel_state = CancelState.init(),
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
         .parent_cancel_state = null,
     };
     defer child.deinit(std.testing.allocator, io);
@@ -892,53 +898,29 @@ test "CancelCtx.deinit: メモリを解放する" {
     const io = std.testing.io;
 
     const ctx = try std.testing.allocator.create(CancelCtx);
+    defer ctx.deinit(std.testing.allocator, io);
+
     ctx.* = .{
         .parent = background,
         .cancel_state = CancelState.init(),
         .parent_cancel_state = null,
     };
-    ctx.deinit(std.testing.allocator, io);
 }
 
 // --- DeadlineCtx.deinit ---
 
-test "DeadlineCtx.deinit: timer_threadがnullのときメモリを解放する" {
+test "DeadlineCtx.deinit: メモリを解放する" {
     const io = std.testing.io;
 
     const ctx = try std.testing.allocator.create(DeadlineCtx);
+    defer ctx.deinit(std.testing.allocator, io);
+
     ctx.* = .{
         .parent = background,
         .cancel_state = CancelState.init(),
         .parent_cancel_state = null,
         .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
     };
-    ctx.deinit(std.testing.allocator, io);
-}
-
-test "DeadlineCtx.deinit: timer_threadをjoinしてメモリを解放する" {
-    const io = std.testing.io;
-
-    const ctx = try std.testing.allocator.create(DeadlineCtx);
-    ctx.* = .{
-        .parent = background,
-        .cancel_state = CancelState.init(),
-        .parent_cancel_state = null,
-        .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .timer_thread = null,
-    };
-    errdefer ctx.deinit(std.testing.allocator, io);
-
-    ctx.timer_thread = try std.Thread.spawn(.{}, struct {
-        fn run(source: *SignalSource, tio: std.Io) void {
-            _ = source.waitTimeout(tio, .{
-                .raw = .{ .nanoseconds = 60 * std.time.ns_per_s },
-                .clock = .awake,
-            });
-        }
-    }.run, .{ &ctx.cancel_state.source, io });
-
-    ctx.deinit(std.testing.allocator, io);
 }
 
 // --- ValueCtx.deinit ---
@@ -949,6 +931,8 @@ test "ValueCtx.deinit: 値とコンテキストのメモリを解放する" {
     val_ptr.* = 42;
 
     const ctx = try std.testing.allocator.create(ValueCtx);
+    defer ctx.deinit(std.testing.allocator);
+
     ctx.* = .{
         .parent = background,
         .key = TypedKey(u32).key,
@@ -959,7 +943,6 @@ test "ValueCtx.deinit: 値とコンテキストのメモリを解放する" {
             }
         }.impl,
     };
-    ctx.deinit(std.testing.allocator);
 }
 
 // --- TypedKey ---

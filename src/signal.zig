@@ -11,10 +11,6 @@ pub const Signal = struct {
         };
     }
 
-    /// キャンセルシグナルが発火するまでブロックする。
-    /// `background`/`todo` の `done()` から得た Signal（`never_fires`）に対して呼び出してはならない。
-    /// これらのコンテキストはキャンセルされないため、永遠にブロックされる意味論になる。
-    /// 呼び出す前に `isFired()` または `waitTimeout()` で発火を確認すること。
     pub fn wait(self: Signal, io: std.Io) void {
         switch (self.inner) {
             .never_fires => @panic("Signal.wait: cannot wait on done() of background/todo context"),
@@ -44,6 +40,7 @@ pub const SignalSource = struct {
 
     // 発火するまでポーリング待機する。タイムアウト前に発火すれば true、超過なら false を返す。
     pub fn waitTimeout(self: *SignalSource, io: std.Io, timeout: std.Io.Clock.Duration) bool {
+        // Duration は符号付き i64。0 または負値は「既にタイムアウト済み」として即座に false を返す。
         if (timeout.raw.nanoseconds <= 0) return false;
         if (self.fired.isSet()) return true;
 
@@ -90,27 +87,20 @@ const SignalInner = union(enum) {
 
 // --- Signal.isFired ---
 
-test "Signal.isFired: 初期状態はfalse" {
-    var source = SignalSource{};
-
-    try std.testing.expect(!source.signal().isFired());
-}
-
-test "Signal.isFired: fire後はtrue" {
+test "Signal.isFired: 各バリアントの発火状態" {
     const io = std.testing.io;
 
-    var source = SignalSource{};
-    source.fire(io);
+    var unfired_source = SignalSource{};
+    var fired_source = SignalSource{};
+    fired_source.fire(io);
 
-    try std.testing.expect(source.signal().isFired());
-}
-
-test "Signal.isFired: never_fires/already_firedは固定状態を返す" {
     const test_cases = [_]struct {
         name: []const u8,
         input: Signal,
         expected: bool,
     }{
+        .{ .name = "初期状態はfalse", .input = unfired_source.signal(), .expected = false },
+        .{ .name = "fire後はtrue", .input = fired_source.signal(), .expected = true },
         .{ .name = "never_fires", .input = .{ .inner = .never_fires }, .expected = false },
         .{ .name = "already_fired", .input = .{ .inner = .already_fired }, .expected = true },
     };

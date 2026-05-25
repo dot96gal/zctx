@@ -84,9 +84,15 @@ fn doWork(ctx: zctx.Context, io: std.Io) void {
 
 #### タイムアウト
 
+`withTimeout` / `withDeadline` は `TimerPool` を必要とする。`TimerPool` はシングルワーカースレッドで
+複数の deadline を管理するため、コンテキスト数に比例したスレッド消費が発生しない。
+
 ```zig
+const pool = try zctx.TimerPool.init(allocator, io);
+defer pool.deinit(allocator, io);
+
 const timeout_scope = try zctx.withTimeout(
-    allocator, io, zctx.background,
+    allocator, io, pool, zctx.background,
     .{ .raw = .{ .nanoseconds = 5 * std.time.ns_per_s }, .clock = .awake },
 );
 defer timeout_scope.deinit(allocator, io);
@@ -99,9 +105,12 @@ std.debug.print("err: {?}\n", .{timeout_scope.context().err(io)}); // error.Dead
 #### デッドライン
 
 ```zig
+const pool = try zctx.TimerPool.init(allocator, io);
+defer pool.deinit(allocator, io);
+
 const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
 const dl = std.Io.Clock.Timestamp{ .raw = .{ .nanoseconds = now_ns + 5 * std.time.ns_per_s }, .clock = .awake };
-const deadline_scope = try zctx.withDeadline(allocator, io, zctx.background, dl);
+const deadline_scope = try zctx.withDeadline(allocator, io, pool, zctx.background, dl);
 defer deadline_scope.deinit(allocator, io);
 
 // デッドラインまで待機
@@ -146,9 +155,12 @@ const user_name = scope2.context().typedValue(UserNameKey);  // ?[]const u8 → 
 いずれか先にキャンセルされた方が子コンテキストに伝播する。
 
 ```zig
+const pool = try zctx.TimerPool.init(allocator, io);
+defer pool.deinit(allocator, io);
+
 // タイムアウト付き親コンテキスト（200ms）
 const timeout_scope = try zctx.withTimeout(
-    allocator, io, zctx.background,
+    allocator, io, pool, zctx.background,
     .{ .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms }, .clock = .awake },
 );
 defer timeout_scope.deinit(allocator, io);
@@ -200,11 +212,15 @@ zctx.canceled          // 最初からキャンセル済み
 // 型安全キーの生成（comptime）
 zctx.TypedKey(comptime T: type) // type — withTypedValue / typedValue で使うキー型を生成する
 
+// TimerPool（withTimeout / withDeadline に必要）
+zctx.TimerPool.init(alloc, io)   // (error{OutOfMemory} || std.Thread.SpawnError)!*TimerPool
+pool.deinit(alloc, io)           // スレッドを join してメモリを解放する。defer で必ず呼ぶ。
+
 // 派生コンテキスト
-zctx.withCancel(alloc, io, parent)                                     // error{OutOfMemory}!OwnedCancelScope
-zctx.withTimeout(alloc, io, parent, timeout: std.Io.Clock.Duration)    // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedDeadlineScope
-zctx.withDeadline(alloc, io, parent, deadline: std.Io.Clock.Timestamp) // (error{OutOfMemory} || std.Thread.SpawnError)!OwnedDeadlineScope
-zctx.withTypedValue(alloc, parent, Key, value)                         // error{OutOfMemory}!OwnedValueScope
+zctx.withCancel(alloc, io, parent)                                           // error{OutOfMemory}!OwnedCancelScope
+zctx.withTimeout(alloc, io, pool, parent, timeout: std.Io.Clock.Duration)    // error{OutOfMemory}!OwnedDeadlineScope
+zctx.withDeadline(alloc, io, pool, parent, deadline: std.Io.Clock.Timestamp) // error{OutOfMemory}!OwnedDeadlineScope
+zctx.withTypedValue(alloc, parent, Key, value)                               // error{OutOfMemory}!OwnedValueScope
 
 // OwnedCancelScope / OwnedDeadlineScope のメソッド（withCancel / withTimeout / withDeadline の返り値）
 scope.context()           // Context 値
@@ -256,6 +272,7 @@ mise install
 | `mise run lint` | リント |
 | `mise run build` | ビルド |
 | `mise run test` | テスト |
+| `mise run bench` | ベンチマーク実行 |
 | `mise run build-coverage` | カバレッジレポート生成（zig-out/coverage/ に出力） |
 | `mise run serve-coverage` | カバレッジレポートをローカルサーバーで配信 |
 | `mise run build-docs` | API ドキュメント生成（zig-out/docs/ に出力） |
@@ -278,6 +295,9 @@ src/
   signal.zig       # SignalSource / Signal の実装とテスト
   context.zig      # Context / CancelState / CancelCtx / DeadlineCtx / ValueCtx / TypedKey の実装とテスト
   scope.zig        # OwnedCancelScope / OwnedDeadlineScope / OwnedValueScope / withCancel / withDeadline / withTimeout / withTypedValue の実装とテスト
+  timer_pool.zig   # TimerPool（シングルワーカースレッド + min-heap によるデッドライン管理）の実装とテスト
+bench/
+  timer_pool.zig   # TimerPool のベンチマーク（N=10/100/1000/10000 のスコープ生成コスト計測）
 example/
   basic.zig        # withCancel の基本的な使い方
   timeout.zig      # withTimeout
@@ -336,6 +356,16 @@ Zig ではこの違いを型で明示している。
 `Context.done()` の呼び出し元が誤ってキャンセルを発火することをコンパイル時に防ぐ。
 `background`・`todo` は永遠に発火しないバリアント、`canceled` は発火済みバリアントとして実装され、
 `cancel_ctx`・`deadline_ctx` は内部の `SignalSource` への参照を保持する。
+
+#### TimerPool によるスレッド数の削減
+
+`withTimeout` / `withDeadline` は 1 コンテキストにつき 1 スレッドを生成すると、スレッド上限を
+超えやすい（N=10000 では OS の上限に達する）。`TimerPool` はシングルワーカースレッド + min-heap で
+全 deadline を管理することで、スレッド消費を O(1) に削減する。
+
+`withTimeout` / `withDeadline` に `*TimerPool` を引数として渡す設計を採用した。プールを呼び出し元が
+管理するため、複数コンテキストで共有するか、コンテキストごとに専用プールを用意するかを利用者が
+自由に決められる（ライブラリが勝手に隠れたシングルトンを保持しない）。
 
 #### キャンセルと解放の分離
 

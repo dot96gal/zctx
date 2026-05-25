@@ -11,10 +11,14 @@ pub fn main(env: std.process.Init) !void {
 
     try stdout.print("=== timeout: withTimeout ===\n", .{});
 
+    const pool = try zctx.TimerPool.init(allocator, io);
+    defer pool.deinit(allocator, io);
+
     // 100ms のタイムアウトを設定する
     const timeout_scope = try zctx.withTimeout(
         allocator,
         io,
+        pool,
         zctx.background,
         .{ .raw = .{ .nanoseconds = 100 * std.time.ns_per_ms }, .clock = .awake },
     );

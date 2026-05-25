@@ -11,10 +11,14 @@ pub fn main(env: std.process.Init) !void {
 
     try stdout.print("=== multi_cancel: 親コンテキストで複数キャンセル条件を合成する ===\n", .{});
 
+    const pool = try zctx.TimerPool.init(allocator, io);
+    defer pool.deinit(allocator, io);
+
     // タイムアウト付き親コンテキストを作成（200ms）
     const timeout_scope = try zctx.withTimeout(
         allocator,
         io,
+        pool,
         zctx.background,
         .{ .raw = .{ .nanoseconds = 200 * std.time.ns_per_ms }, .clock = .awake },
     );

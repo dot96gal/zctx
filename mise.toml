@@ -65,6 +65,10 @@ description = "serve API documentation"
 depends = ["build-docs"]
 run = "npx --yes serve zig-out/docs"
 
+[tasks.bench]
+description = "run benchmarks"
+run = "zig build bench --summary all"
+
 [tasks.release]
 description = "bump version, commit, tag, and push"
 run = "zig-release $@"

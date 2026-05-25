@@ -11,6 +11,7 @@ pub const TypedKey = @import("context.zig").TypedKey;
 pub const OwnedCancelScope = @import("scope.zig").OwnedCancelScope;
 pub const OwnedDeadlineScope = @import("scope.zig").OwnedDeadlineScope;
 pub const OwnedValueScope = @import("scope.zig").OwnedValueScope;
+pub const TimerPool = @import("timer_pool.zig").TimerPool;
 
 pub const withCancel = @import("scope.zig").withCancel;
 pub const withTimeout = @import("scope.zig").withTimeout;
@@ -21,4 +22,5 @@ test {
     _ = @import("signal.zig");
     _ = @import("context.zig");
     _ = @import("scope.zig");
+    _ = @import("timer_pool.zig");
 }

@@ -66,4 +66,21 @@ pub fn build(b: *std.Build) void {
         const step = b.step(step_name, step_desc);
         step.dependOn(&run.step);
     }
+
+    // Benchmark executable
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/timer_pool.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_mod.addImport("zctx", mod);
+
+    const bench_exe = b.addExecutable(.{
+        .name = "bench-timer-pool",
+        .root_module = bench_mod,
+    });
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run benchmarks");
+    bench_step.dependOn(&run_bench.step);
 }
