@@ -26,7 +26,7 @@ pub fn main(env: std.process.Init) !void {
     try stdout.print("err before deadline: {?}\n", .{deadline_scope.context().err(io)});
 
     // デッドラインまで待機する
-    deadline_scope.context().done().wait(io);
+    deadline_scope.context().signal().wait(io);
 
     try stdout.print("err after deadline:  {?}\n", .{deadline_scope.context().err(io)});
     try stdout.flush();

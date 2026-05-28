@@ -98,7 +98,7 @@ const timeout_scope = try zctx.withTimeout(
 defer timeout_scope.deinit(allocator, io);
 
 // タイムアウトまで待機
-timeout_scope.context().done().wait(io);
+timeout_scope.context().signal().wait(io);
 std.debug.print("err: {?}\n", .{timeout_scope.context().err(io)}); // error.DeadlineExceeded
 ```
 
@@ -114,7 +114,7 @@ const deadline_scope = try zctx.withDeadline(allocator, io, pool, zctx.backgroun
 defer deadline_scope.deinit(allocator, io);
 
 // デッドラインまで待機
-deadline_scope.context().done().wait(io);
+deadline_scope.context().signal().wait(io);
 std.debug.print("err: {?}\n", .{deadline_scope.context().err(io)}); // error.DeadlineExceeded
 ```
 
@@ -169,7 +169,7 @@ defer timeout_scope.deinit(allocator, io);
 const work_scope = try zctx.withCancel(allocator, io, timeout_scope.context());
 defer work_scope.deinit(allocator, io);
 
-work_scope.context().done().wait(io);
+work_scope.context().signal().wait(io);
 std.debug.print("err: {?}\n", .{work_scope.context().err(io)});
 ```
 
@@ -195,6 +195,41 @@ defer cancel_scope.deinit(allocator, io); // 宣言順: 1番目 → 実行順: 2
 
 const t = try std.Thread.spawn(.{}, worker, .{cancel_scope.context()});
 defer t.join();          // 宣言順: 2番目 → 実行順: 1番目（先）
+```
+
+### メモリ管理
+
+#### `withTypedValue` の値のライフサイクル
+
+`withTypedValue` は `value` をヒープにコピーし、`OwnedValueScope.deinit` 時にそのコピーを解放する。
+`value` 自体の構造体メモリは自動解放されるが、**構造体内のポインタが指すヒープデータは解放しない**。
+
+たとえば `Key.Value` が `[]u8` フィールドを持つ場合、そのバイト列は呼び出し元が管理する必要がある。
+
+```zig
+const MyKey = zctx.TypedKey(struct { name: []u8 });
+
+// name のバイト列は呼び出し元が管理する
+const name = try allocator.dupe(u8, "example");
+defer allocator.free(name); // ← 呼び出し元が解放する
+
+const scope = try zctx.withTypedValue(allocator, parent, MyKey, .{ .name = name });
+defer scope.deinit(allocator); // ← 構造体コピーのみ解放。name のバイト列は解放しない
+```
+
+#### `TimerPool` と scope の deinit 順序
+
+`OwnedDeadlineScope` の内部は `TimerPool` へのポインタを保持している。`TimerPool` を先に deinit すると、
+後続の `scope.deinit` 内でポインタが無効になり use-after-free が発生する。
+
+`defer` の LIFO 順を活用して **pool を先に宣言し、scope を後に宣言する**（実行順は逆になる）。
+
+```zig
+const pool = try zctx.TimerPool.init(allocator, io);
+defer pool.deinit(allocator, io); // 宣言順: 1番目 → 実行順: 2番目（後）
+
+const scope = try zctx.withDeadline(allocator, io, pool, parent, deadline);
+defer scope.deinit(allocator, io); // 宣言順: 2番目 → 実行順: 1番目（先）
 ```
 
 ### API リファレンス
@@ -224,7 +259,7 @@ zctx.withTypedValue(alloc, parent, Key, value)                               // 
 
 // OwnedCancelScope / OwnedDeadlineScope のメソッド（withCancel / withTimeout / withDeadline の返り値）
 scope.context()           // Context 値
-scope.cancel(io)          // シグナルのみを発火する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
+scope.cancel(io)          // キャンセルを通知する。メモリは解放しない。複数回呼んでも安全に動作する（冪等）。
 scope.deinit(alloc, io)   // メモリを解放する。未キャンセルなら先にキャンセルしてから解放する。defer で必ず呼ぶ。
 
 // OwnedValueScope のメソッド（withTypedValue の返り値）
@@ -232,14 +267,14 @@ scope.context()           // Context 値
 scope.deinit(alloc)       // メモリを解放する。cancel() メソッドは持たない。defer で必ず呼ぶ。
 
 // Context のメソッド
-ctx.done()               // Signal（値型、fire() 不可）— isFired() / wait(io) で待機できる
+ctx.signal()             // Signal（値型、fire() 不可）— isFired() / wait(io) で待機できる
 ctx.err(io)              // ?ContextError  — null / error.Canceled / error.DeadlineExceeded
 ctx.deadline()           // ?std.Io.Clock.Timestamp  — デッドライン（なければ null）
 ctx.typedValue(Key)      // ?Key.Value  — キーに対応する値を型安全に返す。値が存在しなければ null を返す。
 
 // Signal のメソッド（fire() は呼べない）
 signal.isFired()                   // bool — 発火状態をノンブロッキングで確認する。
-signal.wait(io)                    // void — 発火するまでブロックする。
+signal.wait(io)                    // void — 発火するまでブロックする。background / todo の signal() に対して呼ぶと panic する。
 signal.waitTimeout(io, timeout: std.Io.Clock.Duration)  // bool — 発火=true / タイムアウト=false
 ```
 
@@ -329,7 +364,7 @@ pub const Context = union(enum) {
 
 #### 借用と所有の分離
 
-`Context` は値渡しのコピー型で、`done()`・`err()` などの読み取り操作のみを持ちリソースを所有しない。
+`Context` は値渡しのコピー型で、`signal()`・`err()` などの読み取り操作のみを持ちリソースを所有しない。
 ファクトリ関数（`withCancel` など）が返す `OwnedCancelScope`・`OwnedDeadlineScope`・`OwnedValueScope`
 が確保したメモリの所有者であり、`deinit` による解放責務を担う。
 
@@ -352,8 +387,8 @@ Zig ではこの違いを型で明示している。
 `SignalSource` は `fired`（`std.Io.Event`）のみで動作する内部型。`fire()` で一度だけ発火し、
 複数のウェイターに一斉通知する。Go の `chan struct{}` を閉じる操作に相当する。
 
-`Signal` は `Context.done()` が返す公開ラッパー型。`fire()` を持たないため、
-`Context.done()` の呼び出し元が誤ってキャンセルを発火することをコンパイル時に防ぐ。
+`Signal` は `Context.signal()` が返す公開ラッパー型。`fire()` を持たないため、
+`Context.signal()` の呼び出し元が誤ってキャンセルを発火することをコンパイル時に防ぐ。
 `background`・`todo` は永遠に発火しないバリアント、`canceled` は発火済みバリアントとして実装され、
 `cancel_ctx`・`deadline_ctx` は内部の `SignalSource` への参照を保持する。
 

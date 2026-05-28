@@ -13,7 +13,7 @@ pub const Signal = struct {
 
     pub fn wait(self: Signal, io: std.Io) void {
         switch (self.inner) {
-            .never_fires => @panic("Signal.wait: cannot wait on done() of background/todo context"),
+            .never_fires => @panic("Signal.wait called on non-cancellable context"),
             .already_fired => {},
             .source => |s| s.waitUncancelable(io),
         }
@@ -38,6 +38,10 @@ pub const SignalSource = struct {
         self.fired.set(io);
     }
 
+    pub fn signal(self: *SignalSource) Signal {
+        return .{ .inner = .{ .source = self } };
+    }
+
     // 発火するまでポーリング待機する。タイムアウト前に発火すれば true、超過なら false を返す。
     pub fn waitTimeout(self: *SignalSource, io: std.Io, timeout: std.Io.Clock.Duration) bool {
         // Duration は符号付き i64。0 または負値は「既にタイムアウト済み」として即座に false を返す。
@@ -54,14 +58,6 @@ pub const SignalSource = struct {
         return true;
     }
 
-    pub fn signal(self: *SignalSource) Signal {
-        return .{ .inner = .{ .source = self } };
-    }
-
-    fn isFired(self: *const SignalSource) bool {
-        return self.fired.isSet();
-    }
-
     fn waitOnce(
         self: *SignalSource,
         io: std.Io,
@@ -76,6 +72,10 @@ pub const SignalSource = struct {
 
     fn waitUncancelable(self: *SignalSource, io: std.Io) void {
         self.fired.waitUncancelable(io);
+    }
+
+    fn isFired(self: *const SignalSource) bool {
+        return self.fired.isSet();
     }
 };
 

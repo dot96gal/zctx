@@ -27,7 +27,7 @@ pub fn main(env: std.process.Init) !void {
     try stdout.print("err before timeout: {?}\n", .{timeout_scope.context().err(io)});
 
     // タイムアウトまで待機する
-    timeout_scope.context().done().wait(io);
+    timeout_scope.context().signal().wait(io);
 
     try stdout.print("err after timeout:  {?}\n", .{timeout_scope.context().err(io)});
     try stdout.flush();

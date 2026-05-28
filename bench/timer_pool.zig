@@ -31,7 +31,7 @@ fn measure(
     io: std.Io,
     pool: *zctx.TimerPool,
     comptime n: usize,
-) !u64 {
+) error{OutOfMemory}!u64 {
     var min_ns: u64 = std.math.maxInt(u64);
     const timeout: std.Io.Clock.Duration = .{
         .raw = .{ .nanoseconds = 60 * std.time.ns_per_s },

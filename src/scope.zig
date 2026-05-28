@@ -4,6 +4,7 @@ const timer_pool_mod = @import("timer_pool.zig");
 
 const background = context_mod.background;
 const canceled = context_mod.canceled;
+const todo = context_mod.todo;
 const Context = context_mod.Context;
 const ContextError = context_mod.ContextError;
 const CancelState = context_mod.CancelState;
@@ -34,6 +35,8 @@ pub const OwnedDeadlineScope = struct {
     pool: ?*TimerPool,
 
     pub fn deinit(self: OwnedDeadlineScope, allocator: std.mem.Allocator, io: std.Io) void {
+        // pool.unregister で TimerPool への参照を除去してから deadline_ctx を解放する（UAF 防止）。
+        // pool が null の場合は fast-path（deadline が過去）で TimerPool に未登録。
         if (self.pool) |p| p.unregister(io, &self.deadline_ctx.cancel_state);
         self.deadline_ctx.deinit(allocator, io);
     }
@@ -88,18 +91,30 @@ pub fn withDeadline(
     const ctx = try allocator.create(DeadlineCtx);
     errdefer allocator.destroy(ctx);
 
+    // 親の deadline が指定値より早ければ親を採用する（Go context の min-deadline セマンティクス）。
+    const effective_dl = if (parent.deadline()) |pd|
+        if (pd.compare(.lt, dl)) pd else dl
+    else
+        dl;
+
+    if (cancelIfDeadlineExpired(io, parent, effective_dl)) |cancel_err| {
+        ctx.* = .{
+            .parent = parent,
+            .cancel_state = CancelState.init(),
+            .deadline = effective_dl,
+            .parent_cancel_state = null,
+        };
+        ctx.cancel_state.cancel(io, cancel_err);
+        return .{ .deadline_ctx = ctx, .pool = null };
+    }
+
     ctx.* = .{
         .parent = parent,
         .cancel_state = CancelState.init(),
-        .deadline = dl,
+        .deadline = effective_dl,
         .parent_cancel_state = resolveParentState(parent),
     };
-
-    if (tryDeadlineFastPath(io, parent, ctx)) return .{ .deadline_ctx = ctx, .pool = null };
-
-    try pool.register(allocator, io, &ctx.cancel_state, dl);
-    // pool.unregister は ctx のメモリ解放（上の errdefer allocator.destroy(ctx)）より
-    // 先に実行される必要がある。逆順になると解放済みポインタへのアクセス（UAF）が生じる。
+    try pool.register(allocator, io, &ctx.cancel_state, effective_dl);
     errdefer pool.unregister(io, &ctx.cancel_state);
 
     try registerChild(allocator, io, parent, .{ .deadline_ctx = ctx });
@@ -124,6 +139,8 @@ pub fn withTypedValue(
     comptime Key: type,
     val: Key.Value,
 ) error{OutOfMemory}!OwnedValueScope {
+    if (comptime !isValidTypedKey(Key)) @compileError("Key must be created with TypedKey(T)");
+
     const val_ptr = try allocator.create(Key.Value);
     errdefer allocator.destroy(val_ptr);
 
@@ -142,13 +159,28 @@ pub fn withTypedValue(
     return .{ .value_ctx = ctx };
 }
 
+// TypedKey として使用可能な構造かを確認する（一意性は TypedKey(T) で生成した型のみが保証する）
+fn isValidTypedKey(comptime Key: type) bool {
+    if (!@hasDecl(Key, "Value") or
+        @TypeOf(Key.Value) != type or
+        !@hasDecl(Key, "key") or
+        @TypeOf(Key.key) != *anyopaque)
+    {
+        return false;
+    }
+    return true;
+}
+
 fn resolveParentState(parent: Context) ?*CancelState {
-    return switch (parent) {
-        .background, .todo, .canceled => null,
-        .cancel_ctx => |p| &p.cancel_state,
-        .deadline_ctx => |p| &p.cancel_state,
-        .value_ctx => |v| resolveParentState(v.parent),
-    };
+    var current = parent;
+    while (true) {
+        switch (current) {
+            .background, .todo, .canceled => return null,
+            .cancel_ctx => |p| return &p.cancel_state,
+            .deadline_ctx => |p| return &p.cancel_state,
+            .value_ctx => |v| current = v.parent,
+        }
+    }
 }
 
 fn deinitValue(comptime T: type) *const fn (std.mem.Allocator, *anyopaque) void {
@@ -159,14 +191,10 @@ fn deinitValue(comptime T: type) *const fn (std.mem.Allocator, *anyopaque) void 
     }.impl;
 }
 
-fn tryDeadlineFastPath(io: std.Io, parent: Context, ctx: *DeadlineCtx) bool {
-    // Duration は符号付き i64。0 または負値は deadline 超過済みとして fast-path を適用する。
-    if (ctx.deadline.durationFromNow(io).raw.nanoseconds > 0) return false;
-
-    const cancel_err: ContextError = parent.err(io) orelse error.DeadlineExceeded;
-    ctx.cancel_state.cancel(io, cancel_err);
-
-    return true;
+// Duration は符号付き i64。0 または負値は deadline 超過済みとして fast-path を適用する。
+fn cancelIfDeadlineExpired(io: std.Io, parent: Context, dl: std.Io.Clock.Timestamp) ?ContextError {
+    if (dl.durationFromNow(io).raw.nanoseconds > 0) return null;
+    return parent.err(io) orelse error.DeadlineExceeded;
 }
 
 fn registerChild(
@@ -175,13 +203,16 @@ fn registerChild(
     parent: Context,
     child: CancelState.CancelChild,
 ) error{OutOfMemory}!void {
-    return switch (parent) {
-        .background, .todo => {},
-        .canceled => child.propagate(io, error.Canceled),
-        .cancel_ctx => |p| try registerToState(allocator, io, &p.cancel_state, child),
-        .deadline_ctx => |p| try registerToState(allocator, io, &p.cancel_state, child),
-        .value_ctx => |v| try registerChild(allocator, io, v.parent, child),
-    };
+    var current = parent;
+    while (true) {
+        switch (current) {
+            .background, .todo => return,
+            .canceled => return child.propagate(io, error.Canceled),
+            .cancel_ctx => |p| return try registerToState(allocator, io, &p.cancel_state, child),
+            .deadline_ctx => |p| return try registerToState(allocator, io, &p.cancel_state, child),
+            .value_ctx => |v| current = v.parent,
+        }
+    }
 }
 
 fn registerToState(
@@ -198,12 +229,6 @@ fn registerToState(
     } else {
         try state.children.append(allocator, child);
     }
-}
-
-// --- OwnedCancelScope ---
-
-test "OwnedCancelScope: cancel()メソッドを持つ" {
-    try std.testing.expect(@hasDecl(OwnedCancelScope, "cancel"));
 }
 
 // --- OwnedCancelScope.deinit ---
@@ -230,7 +255,7 @@ test "OwnedCancelScope.context: cancel_ctxを返す" {
 
 // --- OwnedCancelScope.cancel ---
 
-test "OwnedCancelScope.cancel: cancel後にdoneになり冪等" {
+test "OwnedCancelScope.cancel: cancel後にsignalが発火し冪等" {
     const io = std.testing.io;
 
     const scope = try withCancel(std.testing.allocator, io, background);
@@ -239,14 +264,8 @@ test "OwnedCancelScope.cancel: cancel後にdoneになり冪等" {
     scope.cancel(io);
     scope.cancel(io);
 
-    try std.testing.expect(scope.context().done().isFired());
+    try std.testing.expect(scope.context().signal().isFired());
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), scope.context().err(io));
-}
-
-// --- OwnedDeadlineScope ---
-
-test "OwnedDeadlineScope: cancel()メソッドを持つ" {
-    try std.testing.expect(@hasDecl(OwnedDeadlineScope, "cancel"));
 }
 
 // --- OwnedDeadlineScope.deinit ---
@@ -297,7 +316,7 @@ test "OwnedDeadlineScope.context: deadline_ctxを返す" {
 
 // --- OwnedDeadlineScope.cancel ---
 
-test "OwnedDeadlineScope.cancel: cancel後にdoneになり冪等" {
+test "OwnedDeadlineScope.cancel: cancel後にsignalが発火し冪等" {
     const io = std.testing.io;
     const pool = try TimerPool.init(std.testing.allocator, io);
     defer pool.deinit(std.testing.allocator, io);
@@ -313,14 +332,8 @@ test "OwnedDeadlineScope.cancel: cancel後にdoneになり冪等" {
     scope.cancel(io);
     scope.cancel(io);
 
-    try std.testing.expect(scope.context().done().isFired());
+    try std.testing.expect(scope.context().signal().isFired());
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), scope.context().err(io));
-}
-
-// --- OwnedValueScope ---
-
-test "OwnedValueScope: cancel()メソッドを持たない" {
-    try std.testing.expect(!@hasDecl(OwnedValueScope, "cancel"));
 }
 
 // --- OwnedValueScope.deinit ---
@@ -334,7 +347,7 @@ test "OwnedValueScope.deinit: 値とコンテキストのメモリを解放す�
 
 // --- withCancel ---
 
-test "withCancel: 初期状態はdoneでない" {
+test "withCancel: 初期状態はsignal未発火" {
     const io = std.testing.io;
 
     const scope = try withCancel(std.testing.allocator, io, background);
@@ -343,7 +356,7 @@ test "withCancel: 初期状態はdoneでない" {
     try std.testing.expectEqual(@as(?ContextError, null), scope.context().err(io));
 }
 
-test "withCancel: cancel後はdone" {
+test "withCancel: cancel後はsignal発火済み" {
     const io = std.testing.io;
 
     const scope = try withCancel(std.testing.allocator, io, background);
@@ -354,15 +367,15 @@ test "withCancel: cancel後はdone" {
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), scope.context().err(io));
 }
 
-test "withCancel: cancel後にdone()が発火する" {
+test "withCancel: cancel後にsignal()が発火する" {
     const io = std.testing.io;
 
     const scope = try withCancel(std.testing.allocator, io, background);
     defer scope.deinit(std.testing.allocator, io);
 
-    try std.testing.expect(!scope.context().done().isFired());
+    try std.testing.expect(!scope.context().signal().isFired());
     scope.cancel(io);
-    try std.testing.expect(scope.context().done().isFired());
+    try std.testing.expect(scope.context().signal().isFired());
 }
 
 test "withCancel: cancelはidempotent" {
@@ -403,7 +416,7 @@ test "withCancel: 子cancelは親に影響しない" {
     try std.testing.expectEqual(@as(?ContextError, null), parent.context().err(io));
 }
 
-test "withCancel: キャンセル済み親から作った子は即座にdone" {
+test "withCancel: キャンセル済み親から作った子は即座にsignal発火済み" {
     const io = std.testing.io;
 
     const parent = try withCancel(std.testing.allocator, io, background);
@@ -415,7 +428,7 @@ test "withCancel: キャンセル済み親から作った子は即座にdone" {
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), child.context().err(io));
 }
 
-test "withCancel: canceledを親にすると即座にdone" {
+test "withCancel: canceledを親にすると即座にsignal発火済み" {
     const io = std.testing.io;
 
     const child = try withCancel(std.testing.allocator, io, canceled);
@@ -424,12 +437,12 @@ test "withCancel: canceledを親にすると即座にdone" {
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), child.context().err(io));
 }
 
-test "withCancel: done().waitTimeout は未キャンセルならfalseを返す" {
+test "withCancel: signal().waitTimeout は未キャンセルならfalseを返す" {
     const io = std.testing.io;
 
     const scope = try withCancel(std.testing.allocator, io, background);
     defer scope.deinit(std.testing.allocator, io);
-    const fired = scope.context().done().waitTimeout(
+    const fired = scope.context().signal().waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
     );
@@ -437,7 +450,7 @@ test "withCancel: done().waitTimeout は未キャンセルならfalseを返す" 
     try std.testing.expect(!fired);
 }
 
-test "withCancel: done().waitTimeout はcancel後にtrueを返す" {
+test "withCancel: signal().waitTimeout はcancel後にtrueを返す" {
     const io = std.testing.io;
 
     const scope = try withCancel(std.testing.allocator, io, background);
@@ -445,7 +458,7 @@ test "withCancel: done().waitTimeout はcancel後にtrueを返す" {
 
     scope.cancel(io);
 
-    const fired = scope.context().done().waitTimeout(
+    const fired = scope.context().signal().waitTimeout(
         io,
         .{ .raw = .{ .nanoseconds = 1 * std.time.ns_per_s }, .clock = .awake },
     );
@@ -511,7 +524,7 @@ test "withCancel: 複数子のうち一つdeinitしても他には伝播され�
 
     parent.cancel(io);
 
-    try std.testing.expect(child2.context().done().isFired());
+    try std.testing.expect(child2.context().signal().isFired());
 }
 
 // --- withDeadline ---
@@ -534,10 +547,10 @@ test "withDeadline: 過去のdeadlineは即座にDeadlineExceeded（fast-path）
         @as(?ContextError, error.DeadlineExceeded),
         scope.context().err(io),
     );
-    try std.testing.expect(scope.context().done().isFired());
+    try std.testing.expect(scope.context().signal().isFired());
 }
 
-test "withDeadline: 未来のdeadlineは初期状態がdoneでない" {
+test "withDeadline: 未来のdeadlineは初期状態がsignal未発火" {
     const io = std.testing.io;
 
     const pool = try TimerPool.init(std.testing.allocator, io);
@@ -551,7 +564,7 @@ test "withDeadline: 未来のdeadlineは初期状態がdoneでない" {
     const scope = try withDeadline(std.testing.allocator, io, pool, background, future);
     defer scope.deinit(std.testing.allocator, io);
 
-    try std.testing.expect(!scope.context().done().isFired());
+    try std.testing.expect(!scope.context().signal().isFired());
 }
 
 test "withDeadline: 親がキャンセル済みのfast-pathはCanceled" {
@@ -643,6 +656,112 @@ test "withDeadline: 子deinit後に親cancelしてもクラッシュしない" {
     parent.cancel(io);
 }
 
+test "withDeadline: 未キャンセル親 + 過去deadlineでもdeinitがクラッシュしない" {
+    const io = std.testing.io;
+
+    const pool = try TimerPool.init(std.testing.allocator, io);
+    defer pool.deinit(std.testing.allocator, io);
+
+    const parent = try withCancel(std.testing.allocator, io, background);
+    defer parent.deinit(std.testing.allocator, io);
+
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const past: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns - 1 },
+        .clock = .awake,
+    };
+    const child = try withDeadline(std.testing.allocator, io, pool, parent.context(), past);
+    child.deinit(std.testing.allocator, io);
+}
+
+test "withDeadline: 親のdeadlineが早ければdeadline()は親のdeadlineを返す" {
+    const io = std.testing.io;
+
+    const pool = try TimerPool.init(std.testing.allocator, io);
+    defer pool.deinit(std.testing.allocator, io);
+
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const parent_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 10 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+    const child_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 60 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+
+    const parent = try withDeadline(std.testing.allocator, io, pool, background, parent_dl);
+    defer parent.deinit(std.testing.allocator, io);
+
+    const child = try withDeadline(std.testing.allocator, io, pool, parent.context(), child_dl);
+    defer child.deinit(std.testing.allocator, io);
+
+    try std.testing.expectEqual(
+        @as(?std.Io.Clock.Timestamp, parent_dl),
+        child.context().deadline(),
+    );
+}
+
+test "withDeadline: cancel_ctx親の deadline が早ければ effective_dl は親の deadline になる" {
+    const io = std.testing.io;
+
+    const pool = try TimerPool.init(std.testing.allocator, io);
+    defer pool.deinit(std.testing.allocator, io);
+
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const parent_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 10 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+    const child_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 60 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+
+    const parent = try withDeadline(std.testing.allocator, io, pool, background, parent_dl);
+    defer parent.deinit(std.testing.allocator, io);
+
+    const cancel = try withCancel(std.testing.allocator, io, parent.context());
+    defer cancel.deinit(std.testing.allocator, io);
+
+    const child = try withDeadline(std.testing.allocator, io, pool, cancel.context(), child_dl);
+    defer child.deinit(std.testing.allocator, io);
+
+    try std.testing.expectEqual(
+        @as(?std.Io.Clock.Timestamp, parent_dl),
+        child.context().deadline(),
+    );
+}
+
+test "withDeadline: 親のdeadlineが過去のとき指定値が未来でもfast-pathになる" {
+    const io = std.testing.io;
+
+    const pool = try TimerPool.init(std.testing.allocator, io);
+    defer pool.deinit(std.testing.allocator, io);
+
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const parent_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns - 1 },
+        .clock = .awake,
+    };
+    const future: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 60 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+
+    const parent = try withDeadline(std.testing.allocator, io, pool, background, parent_dl);
+    defer parent.deinit(std.testing.allocator, io);
+
+    const child = try withDeadline(std.testing.allocator, io, pool, parent.context(), future);
+    defer child.deinit(std.testing.allocator, io);
+
+    try std.testing.expectEqual(
+        @as(?ContextError, error.DeadlineExceeded),
+        child.context().err(io),
+    );
+    try std.testing.expect(child.context().signal().isFired());
+}
+
 // --- withTimeout ---
 
 test "withTimeout: 期限到達でDeadlineExceeded" {
@@ -664,7 +783,7 @@ test "withTimeout: 期限到達でDeadlineExceeded" {
         @as(?ContextError, error.DeadlineExceeded),
         scope.context().err(io),
     );
-    try std.testing.expect(scope.context().done().isFired());
+    try std.testing.expect(scope.context().signal().isFired());
 }
 
 test "withTimeout: cancel前のerr()はnull" {
@@ -705,7 +824,7 @@ test "withTimeout: 期限前にcancel → Canceled" {
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), scope.context().err(io));
 }
 
-test "withTimeout: cancel後にdone()が発火する" {
+test "withTimeout: cancel後にsignal()が発火する" {
     const io = std.testing.io;
 
     const pool = try TimerPool.init(std.testing.allocator, io);
@@ -720,9 +839,9 @@ test "withTimeout: cancel後にdone()が発火する" {
     );
     defer scope.deinit(std.testing.allocator, io);
 
-    try std.testing.expect(!scope.context().done().isFired());
+    try std.testing.expect(!scope.context().signal().isFired());
     scope.cancel(io);
-    try std.testing.expect(scope.context().done().isFired());
+    try std.testing.expect(scope.context().signal().isFired());
 }
 
 test "withTimeout: cancel後にdeinitしてもブロックしない" {
@@ -825,6 +944,33 @@ test "withTypedValue: ctxのOutOfMemoryでリークなし" {
     );
 }
 
+// --- isValidTypedKey ---
+
+test "isValidTypedKey: TypedKey(T)はバリデーションを通過する" {
+    try std.testing.expect(comptime isValidTypedKey(TypedKey(u32)));
+}
+
+test "isValidTypedKey: TypedKey以外の型はバリデーション失敗条件を満たす" {
+    const Plain = struct {};
+    try std.testing.expect(comptime !isValidTypedKey(Plain));
+}
+
+test "isValidTypedKey: keyが*anyopaqueでない型はバリデーション失敗条件を満たす" {
+    const BadKey = struct {
+        pub const Value = u32;
+        pub const key: u32 = 0;
+    };
+    try std.testing.expect(comptime !isValidTypedKey(BadKey));
+}
+
+test "isValidTypedKey: ValueがTypeでない型はバリデーション失敗条件を満たす" {
+    const BadKey = struct {
+        pub const Value: u32 = 0;
+        pub const key: u32 = 0;
+    };
+    try std.testing.expect(comptime !isValidTypedKey(BadKey));
+}
+
 // --- resolveParentState ---
 
 test "resolveParentState: background/todo/canceledはnullを返す" {
@@ -834,7 +980,7 @@ test "resolveParentState: background/todo/canceledはnullを返す" {
         expected: ?*CancelState,
     }{
         .{ .name = "background", .input = background, .expected = null },
-        .{ .name = "todo", .input = context_mod.todo, .expected = null },
+        .{ .name = "todo", .input = todo, .expected = null },
         .{ .name = "canceled", .input = canceled, .expected = null },
     };
 
@@ -912,9 +1058,8 @@ test "resolveParentState: value_ctxはcancel_ctx親のCancelStateを返す" {
     };
     defer value_ctx.deinit(std.testing.allocator);
 
-    const result = resolveParentState(.{ .value_ctx = value_ctx });
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(&cancel_ctx.cancel_state, result.?);
+    const result = resolveParentState(.{ .value_ctx = value_ctx }) orelse return error.TestFailed;
+    try std.testing.expectEqual(&cancel_ctx.cancel_state, result);
 }
 
 test "resolveParentState: value_ctxはbackground親のときnullを返す" {
@@ -945,30 +1090,21 @@ test "deinitValue: 型に対応するデストラクタ関数を返す" {
     deinit_fn(std.testing.allocator, ptr);
 }
 
-// --- tryDeadlineFastPath ---
+// --- cancelIfDeadlineExpired ---
 
-test "tryDeadlineFastPath: deadlineが現在時刻以前ならDeadlineExceeded" {
+test "cancelIfDeadlineExpired: deadlineが現在時刻以前ならDeadlineExceeded" {
     const io = std.testing.io;
 
     const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     const dl: std.Io.Clock.Timestamp = .{ .raw = .{ .nanoseconds = now_ns }, .clock = .awake };
-    const ctx = try std.testing.allocator.create(DeadlineCtx);
-    ctx.* = .{
-        .parent = background,
-        .cancel_state = CancelState.init(),
-        .deadline = dl,
-        .parent_cancel_state = null,
-    };
-    defer ctx.deinit(std.testing.allocator, io);
 
-    try std.testing.expect(tryDeadlineFastPath(io, background, ctx));
     try std.testing.expectEqual(
         @as(?ContextError, error.DeadlineExceeded),
-        ctx.cancel_state.cancel_err,
+        cancelIfDeadlineExpired(io, background, dl),
     );
 }
 
-test "tryDeadlineFastPath: 親がキャンセル済みならCanceledを引き継ぐ" {
+test "cancelIfDeadlineExpired: 親がキャンセル済みならCanceledを引き継ぐ" {
     const io = std.testing.io;
 
     const parent = try withCancel(std.testing.allocator, io, background);
@@ -977,20 +1113,14 @@ test "tryDeadlineFastPath: 親がキャンセル済みならCanceledを引き継
 
     const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
     const dl: std.Io.Clock.Timestamp = .{ .raw = .{ .nanoseconds = now_ns }, .clock = .awake };
-    const ctx = try std.testing.allocator.create(DeadlineCtx);
-    ctx.* = .{
-        .parent = parent.context(),
-        .cancel_state = CancelState.init(),
-        .deadline = dl,
-        .parent_cancel_state = null,
-    };
-    defer ctx.deinit(std.testing.allocator, io);
 
-    try std.testing.expect(tryDeadlineFastPath(io, parent.context(), ctx));
-    try std.testing.expectEqual(@as(?ContextError, error.Canceled), ctx.cancel_state.cancel_err);
+    try std.testing.expectEqual(
+        @as(?ContextError, error.Canceled),
+        cancelIfDeadlineExpired(io, parent.context(), dl),
+    );
 }
 
-test "tryDeadlineFastPath: deadlineが現在時刻より未来ならfalseを返す" {
+test "cancelIfDeadlineExpired: deadlineが現在時刻より未来ならnullを返す" {
     const io = std.testing.io;
 
     const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
@@ -998,17 +1128,11 @@ test "tryDeadlineFastPath: deadlineが現在時刻より未来ならfalseを返�
         .raw = .{ .nanoseconds = now_ns + 60 * std.time.ns_per_s },
         .clock = .awake,
     };
-    const ctx = try std.testing.allocator.create(DeadlineCtx);
-    ctx.* = .{
-        .parent = background,
-        .cancel_state = CancelState.init(),
-        .deadline = dl,
-        .parent_cancel_state = null,
-    };
-    defer ctx.deinit(std.testing.allocator, io);
 
-    try std.testing.expect(!tryDeadlineFastPath(io, background, ctx));
-    try std.testing.expectEqual(@as(?ContextError, null), ctx.cancel_state.cancel_err);
+    try std.testing.expectEqual(
+        @as(?ContextError, null),
+        cancelIfDeadlineExpired(io, background, dl),
+    );
 }
 
 // --- registerChild ---

@@ -39,7 +39,7 @@ pub fn main(env: std.process.Init) !void {
     }.cancelAfterDelay, .{ work_scope, io }); // work_scope の値コピーをスレッドに渡す（所有権共有ではなくコピー）
     defer thread.join();
 
-    work_scope.context().done().wait(io);
+    work_scope.context().signal().wait(io);
 
     try stdout.print("終了理由: {?}\n", .{work_scope.context().err(io)});
     // → error.Canceled（手動キャンセルが 50ms で到達、タイムアウト 200ms より先）

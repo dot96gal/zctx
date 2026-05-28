@@ -15,11 +15,15 @@ pub fn main(env: std.process.Init) !void {
 
     try stdout.print("=== basic: withCancel ===\n", .{});
     try stdout.print("err before cancel: {?}\n", .{cancel_scope.context().err(io)});
-    try stdout.print("done fired before cancel: {}\n", .{cancel_scope.context().done().isFired()});
+    try stdout.print("signal fired before cancel: {}\n", .{
+        cancel_scope.context().signal().isFired(),
+    });
 
     cancel_scope.cancel(io);
 
     try stdout.print("err after cancel:  {?}\n", .{cancel_scope.context().err(io)});
-    try stdout.print("done fired after cancel:  {}\n", .{cancel_scope.context().done().isFired()});
+    try stdout.print("signal fired after cancel:  {}\n", .{
+        cancel_scope.context().signal().isFired(),
+    });
     try stdout.flush();
 }

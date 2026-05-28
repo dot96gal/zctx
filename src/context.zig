@@ -5,6 +5,8 @@ pub const background: Context = .background;
 pub const todo: Context = .todo;
 pub const canceled: Context = .canceled;
 
+const max_propagation_depth: usize = 64;
+
 const Signal = signal_mod.Signal;
 const SignalSource = signal_mod.SignalSource;
 
@@ -21,40 +23,50 @@ pub const Context = union(enum) {
     deadline_ctx: *DeadlineCtx,
     value_ctx: *ValueCtx,
 
-    pub fn done(ctx: Context) Signal {
-        return switch (ctx) {
-            .background, .todo => .{ .inner = .never_fires },
-            .canceled => .{ .inner = .already_fired },
-            .cancel_ctx => |c| c.cancel_state.source.signal(),
-            .deadline_ctx => |d| d.cancel_state.source.signal(),
-            .value_ctx => |v| v.parent.done(),
-        };
+    pub fn signal(ctx: Context) Signal {
+        var current = ctx;
+        while (true) {
+            switch (current) {
+                .background, .todo => return .{ .inner = .never_fires },
+                .canceled => return .{ .inner = .already_fired },
+                .cancel_ctx => |c| return c.cancel_state.source.signal(),
+                .deadline_ctx => |d| return d.cancel_state.source.signal(),
+                .value_ctx => |v| current = v.parent,
+            }
+        }
     }
 
     pub fn err(ctx: Context, io: std.Io) ?ContextError {
-        return switch (ctx) {
-            .background, .todo => null,
-            .canceled => ContextError.Canceled,
-            .cancel_ctx => |c| blk: {
-                c.cancel_state.mutex.lockUncancelable(io);
-                defer c.cancel_state.mutex.unlock(io);
-                break :blk c.cancel_state.cancel_err;
-            },
-            .deadline_ctx => |d| blk: {
-                d.cancel_state.mutex.lockUncancelable(io);
-                defer d.cancel_state.mutex.unlock(io);
-                break :blk d.cancel_state.cancel_err;
-            },
-            .value_ctx => |v| v.parent.err(io),
-        };
+        var current = ctx;
+        while (true) {
+            switch (current) {
+                .background, .todo => return null,
+                .canceled => return ContextError.Canceled,
+                .cancel_ctx => |c| {
+                    c.cancel_state.mutex.lockUncancelable(io);
+                    defer c.cancel_state.mutex.unlock(io);
+                    return c.cancel_state.cancel_err;
+                },
+                .deadline_ctx => |d| {
+                    d.cancel_state.mutex.lockUncancelable(io);
+                    defer d.cancel_state.mutex.unlock(io);
+                    return d.cancel_state.cancel_err;
+                },
+                .value_ctx => |v| current = v.parent,
+            }
+        }
     }
 
     pub fn deadline(ctx: Context) ?std.Io.Clock.Timestamp {
-        return switch (ctx) {
-            .background, .todo, .canceled, .cancel_ctx => null,
-            .deadline_ctx => |d| d.deadline,
-            .value_ctx => |v| v.parent.deadline(),
-        };
+        var current = ctx;
+        while (true) {
+            switch (current) {
+                .background, .todo, .canceled => return null,
+                .cancel_ctx => |c| current = c.parent,
+                .deadline_ctx => |d| return d.deadline,
+                .value_ctx => |v| current = v.parent,
+            }
+        }
     }
 
     pub fn typedValue(ctx: Context, comptime Key: type) ?Key.Value {
@@ -63,12 +75,18 @@ pub const Context = union(enum) {
     }
 
     fn rawValue(ctx: Context, key: *const anyopaque) ?*anyopaque {
-        return switch (ctx) {
-            .background, .todo, .canceled => null,
-            .cancel_ctx => |c| c.parent.rawValue(key),
-            .deadline_ctx => |d| d.parent.rawValue(key),
-            .value_ctx => |v| if (v.key == key) v.val else v.parent.rawValue(key),
-        };
+        var current = ctx;
+        while (true) {
+            switch (current) {
+                .background, .todo, .canceled => return null,
+                .cancel_ctx => |c| current = c.parent,
+                .deadline_ctx => |d| current = d.parent,
+                .value_ctx => |v| {
+                    if (v.key == key) return v.val;
+                    current = v.parent;
+                },
+            }
+        }
     }
 };
 
@@ -100,43 +118,42 @@ pub const CancelState = struct {
     }
 
     pub fn deinit(self: *CancelState, allocator: std.mem.Allocator) void {
+        if (self.cancel_err == null and self.children.items.len > 0)
+            @panic("CancelState.deinit: cancel must be called before deinit when children exist");
         self.children.deinit(allocator);
     }
 
-    // ロック戦略: acquireCancelLock でロック解放後に propagateChildren を呼ぶ。
-    // 子の cancel は子自身の mutex を取得するため、親 CancelState の mutex 保持中に呼ぶとデッドロックになる。
-    // registerToState はキャンセル済み時のみ親 CancelState の mutex 保持中に propagate を呼ぶ。
-    // 子の propagate が取るのは子自身の mutex であり、親の mutex を再取得しないため安全。
     pub fn cancel(self: *CancelState, io: std.Io, reason: ContextError) void {
-        const items = self.acquireCancelLock(io, reason) orelse return;
-        propagateChildren(io, items, reason);
-        self.source.fire(io);
+        self.cancelImpl(io, reason, 0);
     }
 
-    fn acquireCancelLock(
-        self: *CancelState,
-        io: std.Io,
-        reason: ContextError,
-    ) ?[]const CancelChild {
+    // キャンセル伝播は parent → child の一方向のみ。
+    // 逆方向（child → parent）のロック取得パスは存在しないためデッドロックは生じない。
+    // mutex 保持中に子を伝播することで、子 deinit 内の parent.unregister が
+    // 親のロック解放まで待機し、children 参照中の UAF を防ぐ。
+    fn cancelImpl(self: *CancelState, io: std.Io, reason: ContextError, depth: usize) void {
+        if (depth >= max_propagation_depth) @panic("cancel propagation depth exceeded");
+
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
-        if (self.cancel_err != null) return null;
-
+        if (self.cancel_err != null) return;
         self.cancel_err = reason;
-
-        // cancel_err を設定済みのため children への追記はなく、ロック解放後もスライスは安定する。
-        return self.children.items;
-    }
-
-    fn propagateChildren(io: std.Io, items: []const CancelChild, reason: ContextError) void {
-        for (items) |child| child.propagate(io, reason);
+        for (self.children.items) |child| {
+            switch (child) {
+                .cancel_ctx => |c| c.cancel_state.cancelImpl(io, reason, depth + 1),
+                .deadline_ctx => |d| d.cancel_state.cancelImpl(io, reason, depth + 1),
+            }
+        }
+        self.source.fire(io);
     }
 
     fn unregister(self: *CancelState, io: std.Io, child: CancelChild) void {
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
+        // 親の cancel 実行中に子は children リストから除去済みの場合があるため、
+        // @panic に到達させず早期リターンする。
         if (self.cancel_err != null) return;
 
         for (self.children.items, 0..) |item, i| {
@@ -156,8 +173,6 @@ pub const CancelCtx = struct {
     parent_cancel_state: ?*CancelState,
 
     pub fn deinit(self: *CancelCtx, allocator: std.mem.Allocator, io: std.Io) void {
-        // 親がキャンセル済みの場合、unregister は cancel_err を確認して早期リターンするため、
-        // children リストに self が存在しなくても @panic には到達しない。
         if (self.parent_cancel_state) |ps| ps.unregister(io, .{ .cancel_ctx = self });
 
         self.cancel_state.cancel(io, error.Canceled);
@@ -205,9 +220,9 @@ pub fn TypedKey(comptime T: type) type {
     };
 }
 
-// --- Context.done ---
+// --- Context.signal ---
 
-test "Context.done: background/todoは発火しない" {
+test "Context.signal: background/todoは発火しない" {
     const test_cases = [_]struct {
         name: []const u8,
         input: Context,
@@ -220,15 +235,15 @@ test "Context.done: background/todoは発火しない" {
     for (test_cases) |tc| {
         errdefer std.debug.print("FAIL: {s}\n", .{tc.name});
 
-        try std.testing.expectEqual(tc.expected, tc.input.done().isFired());
+        try std.testing.expectEqual(tc.expected, tc.input.signal().isFired());
     }
 }
 
-test "Context.done: canceledは即座に発火済み" {
-    try std.testing.expect(canceled.done().isFired());
+test "Context.signal: canceledは即座に発火済み" {
+    try std.testing.expect(canceled.signal().isFired());
 }
 
-test "Context.done: cancel_ctx はキャンセル後に発火する" {
+test "Context.signal: cancel_ctx はキャンセル後に発火する" {
     const io = std.testing.io;
 
     var ctx = CancelCtx{
@@ -239,12 +254,12 @@ test "Context.done: cancel_ctx はキャンセル後に発火する" {
     defer ctx.cancel_state.deinit(std.testing.allocator);
 
     const c: Context = .{ .cancel_ctx = &ctx };
-    try std.testing.expect(!c.done().isFired());
+    try std.testing.expect(!c.signal().isFired());
     ctx.cancel_state.cancel(io, error.Canceled);
-    try std.testing.expect(c.done().isFired());
+    try std.testing.expect(c.signal().isFired());
 }
 
-test "Context.done: deadline_ctx はキャンセル後に発火する" {
+test "Context.signal: deadline_ctx はキャンセル後に発火する" {
     const io = std.testing.io;
 
     var ctx: DeadlineCtx = .{
@@ -256,12 +271,12 @@ test "Context.done: deadline_ctx はキャンセル後に発火する" {
     defer ctx.cancel_state.deinit(std.testing.allocator);
 
     const c: Context = .{ .deadline_ctx = &ctx };
-    try std.testing.expect(!c.done().isFired());
+    try std.testing.expect(!c.signal().isFired());
     ctx.cancel_state.cancel(io, error.DeadlineExceeded);
-    try std.testing.expect(c.done().isFired());
+    try std.testing.expect(c.signal().isFired());
 }
 
-test "Context.done: value_ctx は親の done() を委譲する" {
+test "Context.signal: value_ctx は親の signal() を委譲する" {
     const Key = TypedKey(u32);
 
     const test_cases = [_]struct {
@@ -292,7 +307,7 @@ test "Context.done: value_ctx は親の done() を委譲する" {
         defer ctx.deinit(std.testing.allocator);
 
         const c: Context = .{ .value_ctx = ctx };
-        try std.testing.expectEqual(tc.expected, c.done().isFired());
+        try std.testing.expectEqual(tc.expected, c.signal().isFired());
     }
 }
 
@@ -400,7 +415,7 @@ test "Context.deadline: background/todo/canceledはnullを返す" {
     }
 }
 
-test "Context.deadline: cancel_ctx は null を返す" {
+test "Context.deadline: cancel_ctx は background 親のとき null を返す" {
     var ctx = CancelCtx{
         .parent = background,
         .cancel_state = CancelState.init(),
@@ -410,6 +425,30 @@ test "Context.deadline: cancel_ctx は null を返す" {
 
     const c: Context = .{ .cancel_ctx = &ctx };
     try std.testing.expectEqual(@as(?std.Io.Clock.Timestamp, null), c.deadline());
+}
+
+test "Context.deadline: cancel_ctx は親の deadline を委譲する" {
+    const dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = 1_000_000_000 },
+        .clock = .awake,
+    };
+    var parent_ctx: DeadlineCtx = .{
+        .parent = background,
+        .cancel_state = CancelState.init(),
+        .deadline = dl,
+        .parent_cancel_state = null,
+    };
+    defer parent_ctx.cancel_state.deinit(std.testing.allocator);
+
+    var cancel_ctx = CancelCtx{
+        .parent = .{ .deadline_ctx = &parent_ctx },
+        .cancel_state = CancelState.init(),
+        .parent_cancel_state = null,
+    };
+    defer cancel_ctx.cancel_state.deinit(std.testing.allocator);
+
+    const c: Context = .{ .cancel_ctx = &cancel_ctx };
+    try std.testing.expectEqual(@as(?std.Io.Clock.Timestamp, dl), c.deadline());
 }
 
 test "Context.deadline: deadline_ctx は設定値を返す" {
@@ -548,9 +587,8 @@ test "Context.rawValue: value_ctx でキーが一致すれば値を返す" {
     defer ctx.deinit(std.testing.allocator);
 
     const c: Context = .{ .value_ctx = ctx };
-    const raw = c.rawValue(Key.key);
-    try std.testing.expect(raw != null);
-    try std.testing.expectEqual(@as(u32, 42), @as(*u32, @ptrCast(@alignCast(raw.?))).*);
+    const raw = c.rawValue(Key.key) orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(u32, 42), @as(*u32, @ptrCast(@alignCast(raw))).*);
 }
 
 test "Context.rawValue: value_ctx でキーが一致しない場合は親に委譲する" {
@@ -602,7 +640,8 @@ test "Context.rawValue: cancel_ctx は親に委譲する" {
     defer cancel_ctx.cancel_state.deinit(std.testing.allocator);
 
     const c: Context = .{ .cancel_ctx = &cancel_ctx };
-    try std.testing.expect(c.rawValue(Key.key) != null);
+    const raw = c.rawValue(Key.key) orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(u32, 42), @as(*u32, @ptrCast(@alignCast(raw))).*);
 }
 
 test "Context.rawValue: deadline_ctx は親に委譲する" {
@@ -632,7 +671,8 @@ test "Context.rawValue: deadline_ctx は親に委譲する" {
     defer deadline_ctx.cancel_state.deinit(std.testing.allocator);
 
     const c: Context = .{ .deadline_ctx = &deadline_ctx };
-    try std.testing.expect(c.rawValue(Key.key) != null);
+    const raw = c.rawValue(Key.key) orelse return error.TestFailed;
+    try std.testing.expectEqual(@as(u32, 42), @as(*u32, @ptrCast(@alignCast(raw))).*);
 }
 
 // --- CancelState.CancelChild.propagate ---
@@ -689,6 +729,8 @@ test "CancelState.init: 初期状態を正しく生成する" {
 // --- CancelState.deinit ---
 
 test "CancelState.deinit: childrenのメモリを解放する" {
+    const io = std.testing.io;
+
     var state = CancelState.init();
 
     var child_ctx = CancelCtx{
@@ -699,6 +741,7 @@ test "CancelState.deinit: childrenのメモリを解放する" {
     defer child_ctx.cancel_state.deinit(std.testing.allocator);
 
     try state.children.append(std.testing.allocator, .{ .cancel_ctx = &child_ctx });
+    state.cancel(io, error.Canceled);
     state.deinit(std.testing.allocator);
 }
 
@@ -775,78 +818,25 @@ test "CancelState.cancel: deadline_ctx子コンテキストに伝播する" {
     }
 }
 
-// --- CancelState.acquireCancelLock ---
+// --- CancelState.cancelImpl ---
 
-test "CancelState.acquireCancelLock: 未キャンセル時にchildrenを返す" {
+test "CancelState.cancelImpl: depth = 0 で cancel と同等に動作する" {
     const io = std.testing.io;
 
     var state = CancelState.init();
-    defer state.deinit(std.testing.allocator);
+    state.cancelImpl(io, error.Canceled, 0);
 
-    const child = try std.testing.allocator.create(CancelCtx);
-    child.* = .{
-        .parent = background,
-        .cancel_state = CancelState.init(),
-        .parent_cancel_state = null,
-    };
-    defer child.deinit(std.testing.allocator, io);
-
-    try state.children.append(std.testing.allocator, .{ .cancel_ctx = child });
-
-    const result = state.acquireCancelLock(io, error.Canceled);
-
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 1), result.?.len);
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
+    try std.testing.expect(state.source.signal().isFired());
 }
 
-test "CancelState.acquireCancelLock: キャンセル済み時にnullを返す" {
+test "CancelState.cancelImpl: depth = max_propagation_depth - 1 で正常に動作する" {
     const io = std.testing.io;
 
     var state = CancelState.init();
-    state.cancel(io, error.Canceled);
+    state.cancelImpl(io, error.Canceled, max_propagation_depth - 1);
 
-    const result = state.acquireCancelLock(io, error.DeadlineExceeded);
-
-    try std.testing.expect(result == null);
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
-}
-
-// --- CancelState.propagateChildren ---
-
-test "CancelState.propagateChildren: cancel_ctx子コンテキストに伝播する" {
-    const io = std.testing.io;
-
-    const child = try std.testing.allocator.create(CancelCtx);
-    child.* = .{
-        .parent = background,
-        .cancel_state = CancelState.init(),
-        .parent_cancel_state = null,
-    };
-    defer child.deinit(std.testing.allocator, io);
-
-    const items = [_]CancelState.CancelChild{.{ .cancel_ctx = child }};
-    CancelState.propagateChildren(io, &items, error.Canceled);
-
-    try std.testing.expectEqual(@as(?ContextError, error.Canceled), child.cancel_state.cancel_err);
-}
-
-test "CancelState.propagateChildren: deadline_ctx子コンテキストに伝播する" {
-    const io = std.testing.io;
-
-    const child = try std.testing.allocator.create(DeadlineCtx);
-    child.* = .{
-        .parent = background,
-        .cancel_state = CancelState.init(),
-        .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
-        .parent_cancel_state = null,
-    };
-    defer child.deinit(std.testing.allocator, io);
-
-    const items = [_]CancelState.CancelChild{.{ .deadline_ctx = child }};
-    CancelState.propagateChildren(io, &items, error.Canceled);
-
-    try std.testing.expectEqual(@as(?ContextError, error.Canceled), child.cancel_state.cancel_err);
 }
 
 // --- CancelState.unregister ---
