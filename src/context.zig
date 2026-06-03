@@ -106,7 +106,7 @@ pub const CancelState = struct {
     mutex: std.Io.Mutex,
     source: SignalSource,
     cancel_err: ?ContextError,
-    children: std.ArrayListUnmanaged(CancelChild),
+    children: std.ArrayList(CancelChild),
 
     pub fn init() CancelState {
         return .{

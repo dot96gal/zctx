@@ -19,7 +19,7 @@ pub const TimerPool = struct {
     thread: ?std.Thread,
     shutdown: std.atomic.Value(bool),
     mutex: std.Io.Mutex,
-    heap: std.ArrayListUnmanaged(Entry),
+    heap: std.ArrayList(Entry),
     wakeup_ptr: ?*SignalSource,
 
     pub fn init(
@@ -145,7 +145,7 @@ pub const TimerPool = struct {
     }
 };
 
-fn popMin(heap: *std.ArrayListUnmanaged(TimerPool.Entry)) TimerPool.Entry {
+fn popMin(heap: *std.ArrayList(TimerPool.Entry)) TimerPool.Entry {
     if (heap.items.len == 0) @panic("popMin called on empty heap");
 
     const min = heap.items[0];
@@ -566,7 +566,7 @@ test "popMin: 最小値を取り出せる" {
         var dummy = CancelState.init();
         defer dummy.deinit(std.testing.allocator);
 
-        var heap: std.ArrayListUnmanaged(TimerPool.Entry) = .empty;
+        var heap: std.ArrayList(TimerPool.Entry) = .empty;
         defer heap.deinit(std.testing.allocator);
 
         for (tc.input) |ns| {
@@ -606,7 +606,7 @@ test "popMin: 連続popで昇順に取り出せる" {
         var dummy = CancelState.init();
         defer dummy.deinit(std.testing.allocator);
 
-        var heap: std.ArrayListUnmanaged(TimerPool.Entry) = .empty;
+        var heap: std.ArrayList(TimerPool.Entry) = .empty;
         defer heap.deinit(std.testing.allocator);
 
         for (tc.input) |ns| {
@@ -650,7 +650,7 @@ test "siftUp: 末尾の要素を適切な位置に移動する" {
         var dummy = CancelState.init();
         defer dummy.deinit(std.testing.allocator);
 
-        var heap: std.ArrayListUnmanaged(TimerPool.Entry) = .empty;
+        var heap: std.ArrayList(TimerPool.Entry) = .empty;
         defer heap.deinit(std.testing.allocator);
 
         for (tc.input) |ns| {
@@ -691,7 +691,7 @@ test "siftDown: rootの要素を適切な位置に移動する" {
         var dummy = CancelState.init();
         defer dummy.deinit(std.testing.allocator);
 
-        var heap: std.ArrayListUnmanaged(TimerPool.Entry) = .empty;
+        var heap: std.ArrayList(TimerPool.Entry) = .empty;
         defer heap.deinit(std.testing.allocator);
 
         for (tc.input) |ns| {
