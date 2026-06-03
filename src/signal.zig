@@ -269,6 +269,10 @@ test "SignalSource.waitTimeout: 非正のDurationは即座にfalse" {
         io,
         .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
     ));
+    try std.testing.expect(!source.waitTimeout(
+        io,
+        .{ .raw = .{ .nanoseconds = -1 }, .clock = .awake },
+    ));
 }
 
 // --- SignalSource.signal ---

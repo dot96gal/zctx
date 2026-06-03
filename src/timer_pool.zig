@@ -705,3 +705,30 @@ test "siftDown: rootの要素を適切な位置に移動する" {
         try std.testing.expectEqual(tc.expected, heap.items[0].deadline.raw.nanoseconds);
     }
 }
+
+test "siftDown: 2階層以上の移動後もヒープ性が保たれる" {
+    var dummy = CancelState.init();
+    defer dummy.deinit(std.testing.allocator);
+
+    var heap: std.ArrayList(TimerPool.Entry) = .empty;
+    defer heap.deinit(std.testing.allocator);
+
+    // 子のサブツリーは有効な min-heap だが root が最大値、という配置を作る。
+    // siftDown は root を 2 階層分（index 0 → 1 → 3）押し下げる必要がある。
+    const input = [_]i64{ 700, 100, 200, 300, 400, 500, 600 };
+    for (input) |ns| {
+        try heap.append(std.testing.allocator, .{
+            .deadline = .{ .raw = .{ .nanoseconds = ns }, .clock = .awake },
+            .cancel_state = &dummy,
+        });
+    }
+
+    siftDown(heap.items, 0);
+
+    // popMin を連続で呼び、昇順に取り出せればヒープ性が保たれている。
+    const expected = [_]i64{ 100, 200, 300, 400, 500, 600, 700 };
+    for (expected) |want| {
+        const min = popMin(&heap);
+        try std.testing.expectEqual(want, min.deadline.raw.nanoseconds);
+    }
+}

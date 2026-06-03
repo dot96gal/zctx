@@ -702,6 +702,34 @@ test "withDeadline: 親のdeadlineが早ければdeadline()は親のdeadlineを�
     );
 }
 
+test "withDeadline: 指定dlが親のdeadlineより早ければdeadline()は指定dlを返す" {
+    const io = std.testing.io;
+
+    const pool = try TimerPool.init(std.testing.allocator, io);
+    defer pool.deinit(std.testing.allocator, io);
+
+    const now_ns = std.Io.Clock.Timestamp.now(io, .awake).raw.nanoseconds;
+    const parent_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 60 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+    const child_dl: std.Io.Clock.Timestamp = .{
+        .raw = .{ .nanoseconds = now_ns + 10 * std.time.ns_per_s },
+        .clock = .awake,
+    };
+
+    const parent = try withDeadline(std.testing.allocator, io, pool, background, parent_dl);
+    defer parent.deinit(std.testing.allocator, io);
+
+    const child = try withDeadline(std.testing.allocator, io, pool, parent.context(), child_dl);
+    defer child.deinit(std.testing.allocator, io);
+
+    try std.testing.expectEqual(
+        @as(?std.Io.Clock.Timestamp, child_dl),
+        child.context().deadline(),
+    );
+}
+
 test "withDeadline: cancel_ctx親の deadline が早ければ effective_dl は親の deadline になる" {
     const io = std.testing.io;
 
