@@ -527,6 +527,104 @@ test "withCancel: 複数子のうち一つdeinitしても他には伝播され�
     try std.testing.expect(child2.context().signal().isFired());
 }
 
+test "withCancel: 深い線形連鎖でも親cancelが末端まで伝播する（panicしない）" {
+    const io = std.testing.io;
+
+    // cancelIterative のインラインフレーム上限(64)を十分に超える深さ。
+    // 線形連鎖は hand-over-hand により常に 1 フレームで処理されるため
+    // 深さに関係なく panic しないことを確認する。
+    const depth = 256;
+    var scopes: [depth]OwnedCancelScope = undefined;
+
+    scopes[0] = try withCancel(std.testing.allocator, io, background);
+    var i: usize = 1;
+    while (i < depth) : (i += 1) {
+        scopes[i] = try withCancel(std.testing.allocator, io, scopes[i - 1].context());
+    }
+    // 子から順に（親より先に）解放する。
+    defer {
+        var j: usize = depth;
+        while (j > 0) {
+            j -= 1;
+            scopes[j].deinit(std.testing.allocator, io);
+        }
+    }
+
+    scopes[0].cancel(io);
+
+    try std.testing.expectEqual(
+        @as(?ContextError, error.Canceled),
+        scopes[depth - 1].context().err(io),
+    );
+}
+
+test "withCancel: 分岐ツリー全体にcancelが伝播する" {
+    const io = std.testing.io;
+
+    const root = try withCancel(std.testing.allocator, io, background);
+    const a = try withCancel(std.testing.allocator, io, root.context());
+    const a_child = try withCancel(std.testing.allocator, io, a.context());
+    const b = try withCancel(std.testing.allocator, io, root.context());
+    // 解放は子→親の順（defer は宣言の逆順に実行される）。
+    defer root.deinit(std.testing.allocator, io);
+    defer b.deinit(std.testing.allocator, io);
+    defer a.deinit(std.testing.allocator, io);
+    defer a_child.deinit(std.testing.allocator, io);
+
+    root.cancel(io);
+
+    try std.testing.expectEqual(@as(?ContextError, error.Canceled), a.context().err(io));
+    try std.testing.expectEqual(@as(?ContextError, error.Canceled), a_child.context().err(io));
+    try std.testing.expectEqual(@as(?ContextError, error.Canceled), b.context().err(io));
+}
+
+test "withCancel: インラインフレームを超える深い分岐ツリーはフォールバックで伝播する" {
+    const io = std.testing.io;
+
+    // 各 spine[i] が「子 spine[i+1]（分岐）＋末尾 extra[i]」を持つ左偏分岐ツリー。
+    // spine の分岐ネストがインラインフレーム上限(64)を超えると cancelRecursive へ
+    // フォールバックする。その経路でも全ノードへ伝播することを確認する。
+    const depth = 80;
+    var spine: [depth]OwnedCancelScope = undefined;
+    var extra: [depth]OwnedCancelScope = undefined;
+
+    // 先に spine を全段作る（spine[i+1] が spine[i] の children[0] になる）。
+    spine[0] = try withCancel(std.testing.allocator, io, background);
+    var i: usize = 1;
+    while (i < depth) : (i += 1) {
+        spine[i] = try withCancel(std.testing.allocator, io, spine[i - 1].context());
+    }
+    // 次に extra を作る（spine[i] の children[1] になり、spine の子を非末尾にする）。
+    i = 0;
+    while (i < depth) : (i += 1) {
+        extra[i] = try withCancel(std.testing.allocator, io, spine[i].context());
+    }
+    // 解放は深い段から（子→親の順）。各段では extra[i] を spine[i] より先に解放する。
+    defer {
+        var j: usize = depth;
+        while (j > 0) {
+            j -= 1;
+            extra[j].deinit(std.testing.allocator, io);
+            spine[j].deinit(std.testing.allocator, io);
+        }
+    }
+
+    spine[0].cancel(io);
+
+    try std.testing.expectEqual(
+        @as(?ContextError, error.Canceled),
+        spine[depth - 1].context().err(io),
+    );
+    try std.testing.expectEqual(
+        @as(?ContextError, error.Canceled),
+        extra[0].context().err(io),
+    );
+    try std.testing.expectEqual(
+        @as(?ContextError, error.Canceled),
+        extra[depth - 1].context().err(io),
+    );
+}
+
 // --- withDeadline ---
 
 test "withDeadline: 過去のdeadlineは即座にDeadlineExceeded（fast-path）" {

@@ -5,7 +5,14 @@ pub const background: Context = .background;
 pub const todo: Context = .todo;
 pub const canceled: Context = .canceled;
 
-const max_propagation_depth: usize = 64;
+// cancelIterative がスタック上に確保する Frame 数。分岐のネスト深さがこれを超えた
+// 場合のみ cancelRecursive へフォールバックする。線形連鎖は hand-over-hand により
+// 常に 1 フレームで処理されるため、この上限に達するのは深い左偏分岐ツリーに限られる。
+const max_inline_frames: usize = 64;
+
+// cancelRecursive の最終防衛ライン。スタックオーバーフローを明示メッセージで先に止める。
+// 到達には max_inline_frames を超える深さの分岐ツリーが必要で、現実的には起こらない。
+const max_fallback_depth: usize = 128;
 
 const Signal = signal_mod.Signal;
 const SignalSource = signal_mod.SignalSource;
@@ -123,29 +130,130 @@ pub const CancelState = struct {
         self.children.deinit(allocator);
     }
 
+    const Visit = enum { already_canceled, leaf, branch };
+
+    // cancelIterative の明示スタックの 1 要素。state のロックを保持したまま、
+    // その children を index から順に処理していく途中状態を表す。
+    const Frame = struct {
+        state: *CancelState,
+        index: usize,
+    };
+
     pub fn cancel(self: *CancelState, io: std.Io, reason: ContextError) void {
-        self.cancelImpl(io, reason, 0);
+        cancelIterative(self, io, reason);
     }
 
-    // キャンセル伝播は parent → child の一方向のみ。
-    // 逆方向（child → parent）のロック取得パスは存在しないためデッドロックは生じない。
-    // mutex 保持中に子を伝播することで、子 deinit 内の parent.unregister が
-    // 親のロック解放まで待機し、children 参照中の UAF を防ぐ。
-    fn cancelImpl(self: *CancelState, io: std.Io, reason: ContextError, depth: usize) void {
-        if (depth >= max_propagation_depth) @panic("cancel propagation depth exceeded");
+    // ノードを訪問して cancel_err を設定し source を発火する。
+    // - already_canceled: 既にキャンセル済み。ロックは解放済みで子の伝播も不要。
+    // - leaf: 子を持たないため処理完了。ロックは解放済み。
+    // - branch: 子を持つ。呼び出し元が children を処理し終えるまで mutex を保持したまま返す。
+    fn enter(state: *CancelState, io: std.Io, reason: ContextError) Visit {
+        state.mutex.lockUncancelable(io);
+        if (state.cancel_err != null) {
+            state.mutex.unlock(io);
+            return .already_canceled;
+        }
+        state.cancel_err = reason;
+        state.source.fire(io);
+        if (state.children.items.len == 0) {
+            state.mutex.unlock(io);
+            return .leaf;
+        }
+        return .branch;
+    }
+
+    fn childState(child: CancelChild) *CancelState {
+        return switch (child) {
+            .cancel_ctx => |c| &c.cancel_state,
+            .deadline_ctx => |d| &d.cancel_state,
+        };
+    }
+
+    // キャンセル伝播は parent → child の一方向のみ（逆方向のロック取得パスは存在しない）
+    // ためデッドロックは生じない。
+    //
+    // UAF 防止の不変条件：子ポインタ c を参照する間は c をピン留めしておく必要がある。
+    //   1. c を children から読み出して enter する間は、親（f.state）のロックを保持している。
+    //      c.deinit は先頭で親.unregister を呼び親ロックを要求するため、親ロック保持中は
+    //      c が解放されない。
+    //   2. enter(c) で c 自身のロックを取得した後は、c.deinit が c.cancel（c ロック要求）で
+    //      ブロックするため、親ロックを解放しても c は解放されない（self-pinning）。
+    // この 2 段階のピン留めにより hand-over-hand で親ロックを早期解放でき、線形連鎖は
+    // 常に 1 フレームで処理される（深さに依存せず panic しない）。
+    fn cancelIterative(self: *CancelState, io: std.Io, reason: ContextError) void {
+        var buf: [max_inline_frames]Frame = undefined;
+        var top: usize = 0;
+
+        switch (enter(self, io, reason)) {
+            .already_canceled, .leaf => return,
+            .branch => {
+                buf[0] = .{ .state = self, .index = 0 };
+                top = 1;
+            },
+        }
+
+        while (top > 0) {
+            const f = &buf[top - 1];
+            const children = f.state.children.items;
+            if (f.index >= children.len) {
+                f.state.mutex.unlock(io);
+                top -= 1;
+                continue;
+            }
+
+            const child = childState(children[f.index]);
+            f.index += 1;
+            const parent_done = f.index >= children.len;
+
+            // インラインバッファが満杯のときは、この子のサブツリーを再帰でドレインする。
+            // child は f.state のロック（保持中）でピン留めされているため安全。
+            if (top == max_inline_frames) {
+                cancelRecursive(child, io, reason, 0);
+                if (parent_done) {
+                    f.state.mutex.unlock(io);
+                    top -= 1;
+                }
+                continue;
+            }
+
+            switch (enter(child, io, reason)) {
+                .already_canceled, .leaf => {
+                    if (parent_done) {
+                        f.state.mutex.unlock(io);
+                        top -= 1;
+                    }
+                },
+                .branch => {
+                    if (parent_done) {
+                        // hand-over-hand: 親に未処理の子が残っていないので親ロックを解放し、
+                        // スタックの枠を子で置き換える。child は自身のロックでピン留め済み。
+                        f.state.mutex.unlock(io);
+                        buf[top - 1] = .{ .state = child, .index = 0 };
+                    } else {
+                        buf[top] = .{ .state = child, .index = 0 };
+                        top += 1;
+                    }
+                },
+            }
+        }
+    }
+
+    // インラインバッファを超える深さの分岐ツリーに対するフォールバック。
+    // 元の再帰方式（親ロックを保持したまま子へ伝播）でサブツリーを処理する。
+    // 現実的なコンテキスト連鎖は cancelIterative が O(1) フレームで処理するため、
+    // この経路に到達するのは極端に深い左偏分岐ツリーに限られる。
+    fn cancelRecursive(self: *CancelState, io: std.Io, reason: ContextError, depth: usize) void {
+        if (depth >= max_fallback_depth) @panic("cancel propagation fallback depth exceeded");
 
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
 
         if (self.cancel_err != null) return;
         self.cancel_err = reason;
-        for (self.children.items) |child| {
-            switch (child) {
-                .cancel_ctx => |c| c.cancel_state.cancelImpl(io, reason, depth + 1),
-                .deadline_ctx => |d| d.cancel_state.cancelImpl(io, reason, depth + 1),
-            }
-        }
         self.source.fire(io);
+        for (self.children.items) |child| {
+            cancelRecursive(childState(child), io, reason, depth + 1);
+        }
     }
 
     fn unregister(self: *CancelState, io: std.Io, child: CancelChild) void {
@@ -818,23 +926,98 @@ test "CancelState.cancel: deadline_ctx子コンテキストに伝播する" {
     }
 }
 
-// --- CancelState.cancelImpl ---
+// --- CancelState.enter ---
 
-test "CancelState.cancelImpl: depth = 0 で cancel と同等に動作する" {
+test "CancelState.enter: 子なしは leaf を返し err 設定・発火する" {
     const io = std.testing.io;
 
     var state = CancelState.init();
-    state.cancelImpl(io, error.Canceled, 0);
+    defer state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(CancelState.Visit.leaf, CancelState.enter(&state, io, error.Canceled));
+    try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
+    try std.testing.expect(state.source.signal().isFired());
+}
+
+test "CancelState.enter: キャンセル済みは already_canceled を返し理由を保持する" {
+    const io = std.testing.io;
+
+    var state = CancelState.init();
+    defer state.deinit(std.testing.allocator);
+    state.cancel(io, error.Canceled);
+
+    try std.testing.expectEqual(
+        CancelState.Visit.already_canceled,
+        CancelState.enter(&state, io, error.DeadlineExceeded),
+    );
+    try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
+}
+
+test "CancelState.enter: 子ありは branch を返しロックを保持する（解放して検証）" {
+    const io = std.testing.io;
+
+    var state = CancelState.init();
+
+    var child_ctx = CancelCtx{
+        .parent = background,
+        .cancel_state = CancelState.init(),
+        .parent_cancel_state = null,
+    };
+    defer child_ctx.cancel_state.deinit(std.testing.allocator);
+
+    try state.children.append(std.testing.allocator, .{ .cancel_ctx = &child_ctx });
+
+    try std.testing.expectEqual(CancelState.Visit.branch, CancelState.enter(&state, io, error.Canceled));
+    // branch はロックを保持したまま返すため、テスト側で解放してから後始末する。
+    state.mutex.unlock(io);
+    state.deinit(std.testing.allocator);
+}
+
+// --- CancelState.childState ---
+
+test "CancelState.childState: 各バリアントの cancel_state を返す" {
+    var cancel_ctx = CancelCtx{
+        .parent = background,
+        .cancel_state = CancelState.init(),
+        .parent_cancel_state = null,
+    };
+    defer cancel_ctx.cancel_state.deinit(std.testing.allocator);
+
+    var deadline_ctx: DeadlineCtx = .{
+        .parent = background,
+        .cancel_state = CancelState.init(),
+        .deadline = .{ .raw = .{ .nanoseconds = 0 }, .clock = .awake },
+        .parent_cancel_state = null,
+    };
+    defer deadline_ctx.cancel_state.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(
+        &cancel_ctx.cancel_state,
+        CancelState.childState(.{ .cancel_ctx = &cancel_ctx }),
+    );
+    try std.testing.expectEqual(
+        &deadline_ctx.cancel_state,
+        CancelState.childState(.{ .deadline_ctx = &deadline_ctx }),
+    );
+}
+
+// --- CancelState.cancelRecursive ---
+
+test "CancelState.cancelRecursive: depth = 0 で cancel と同等に動作する" {
+    const io = std.testing.io;
+
+    var state = CancelState.init();
+    state.cancelRecursive(io, error.Canceled, 0);
 
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
     try std.testing.expect(state.source.signal().isFired());
 }
 
-test "CancelState.cancelImpl: depth = max_propagation_depth - 1 で正常に動作する" {
+test "CancelState.cancelRecursive: depth = max_fallback_depth - 1 で正常に動作する" {
     const io = std.testing.io;
 
     var state = CancelState.init();
-    state.cancelImpl(io, error.Canceled, max_propagation_depth - 1);
+    state.cancelRecursive(io, error.Canceled, max_fallback_depth - 1);
 
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
 }
