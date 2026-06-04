@@ -252,9 +252,11 @@ zctx.TimerPool.init(alloc, io)   // (error{OutOfMemory} || std.Thread.SpawnError
 pool.deinit(alloc, io)           // スレッドを join してメモリを解放する。defer で必ず呼ぶ。
 
 // 派生コンテキスト
-zctx.withCancel(alloc, io, parent)                                           // error{OutOfMemory}!OwnedCancelScope
-zctx.withTimeout(alloc, io, pool, parent, timeout: std.Io.Clock.Duration)    // error{OutOfMemory}!OwnedDeadlineScope
-zctx.withDeadline(alloc, io, pool, parent, deadline: std.Io.Clock.Timestamp) // error{OutOfMemory}!OwnedDeadlineScope
+// ScopeError = error{ OutOfMemory, ContextDepthExceeded }
+// ContextDepthExceeded: キャンセル木の深さが内部上限に達すると返す
+zctx.withCancel(alloc, io, parent)                                           // ScopeError!OwnedCancelScope
+zctx.withTimeout(alloc, io, pool, parent, timeout: std.Io.Clock.Duration)    // ScopeError!OwnedDeadlineScope
+zctx.withDeadline(alloc, io, pool, parent, deadline: std.Io.Clock.Timestamp) // ScopeError!OwnedDeadlineScope
 zctx.withTypedValue(alloc, parent, Key, value)                               // error{OutOfMemory}!OwnedValueScope
 
 // OwnedCancelScope / OwnedDeadlineScope のメソッド（withCancel / withTimeout / withDeadline の返り値）

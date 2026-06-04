@@ -8,6 +8,7 @@ pub const Signal = @import("signal.zig").Signal;
 pub const Context = @import("context.zig").Context;
 pub const ContextError = @import("context.zig").ContextError;
 pub const TypedKey = @import("context.zig").TypedKey;
+pub const ScopeError = @import("scope.zig").ScopeError;
 pub const OwnedCancelScope = @import("scope.zig").OwnedCancelScope;
 pub const OwnedDeadlineScope = @import("scope.zig").OwnedDeadlineScope;
 pub const OwnedValueScope = @import("scope.zig").OwnedValueScope;

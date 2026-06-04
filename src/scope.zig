@@ -62,19 +62,27 @@ pub const OwnedValueScope = struct {
     }
 };
 
+// 生成系 API（withCancel / withDeadline / withTimeout）のエラー集合。
+// ContextDepthExceeded はキャンセル木の深さが上限に達した場合に返す（CancelState.childDepth 参照）。
+pub const ScopeError = error{ OutOfMemory, ContextDepthExceeded };
+
 pub fn withCancel(
     allocator: std.mem.Allocator,
     io: std.Io,
     parent: Context,
-) error{OutOfMemory}!OwnedCancelScope {
+) ScopeError!OwnedCancelScope {
+    const parent_state = resolveParentState(parent);
+    const depth = try CancelState.childDepth(parent_state);
+
     const ctx = try allocator.create(CancelCtx);
     errdefer allocator.destroy(ctx);
 
     ctx.* = .{
         .parent = parent,
         .cancel_state = CancelState.init(),
-        .parent_cancel_state = resolveParentState(parent),
+        .parent_cancel_state = parent_state,
     };
+    ctx.cancel_state.depth = depth;
 
     try registerChild(allocator, io, parent, .{ .cancel_ctx = ctx });
 
@@ -87,7 +95,10 @@ pub fn withDeadline(
     pool: *TimerPool,
     parent: Context,
     dl: std.Io.Clock.Timestamp,
-) error{OutOfMemory}!OwnedDeadlineScope {
+) ScopeError!OwnedDeadlineScope {
+    const parent_state = resolveParentState(parent);
+    const depth = try CancelState.childDepth(parent_state);
+
     const ctx = try allocator.create(DeadlineCtx);
     errdefer allocator.destroy(ctx);
 
@@ -104,6 +115,7 @@ pub fn withDeadline(
             .deadline = effective_dl,
             .parent_cancel_state = null,
         };
+        ctx.cancel_state.depth = depth;
         ctx.cancel_state.cancel(io, cancel_err);
         return .{ .deadline_ctx = ctx, .pool = null };
     }
@@ -112,8 +124,9 @@ pub fn withDeadline(
         .parent = parent,
         .cancel_state = CancelState.init(),
         .deadline = effective_dl,
-        .parent_cancel_state = resolveParentState(parent),
+        .parent_cancel_state = parent_state,
     };
+    ctx.cancel_state.depth = depth;
     try pool.register(allocator, io, &ctx.cancel_state, effective_dl);
     errdefer pool.unregister(io, &ctx.cancel_state);
 
@@ -128,7 +141,7 @@ pub fn withTimeout(
     pool: *TimerPool,
     parent: Context,
     timeout: std.Io.Clock.Duration,
-) error{OutOfMemory}!OwnedDeadlineScope {
+) ScopeError!OwnedDeadlineScope {
     const dl = std.Io.Clock.Timestamp.fromNow(io, timeout);
     return withDeadline(allocator, io, pool, parent, dl);
 }
@@ -530,9 +543,8 @@ test "withCancel: 複数子のうち一つdeinitしても他には伝播され�
 test "withCancel: 深い線形連鎖でも親cancelが末端まで伝播する（panicしない）" {
     const io = std.testing.io;
 
-    // cancelIterative のインラインフレーム上限(64)を十分に超える深さ。
-    // 線形連鎖は hand-over-hand により常に 1 フレームで処理されるため
-    // 深さに関係なく panic しないことを確認する。
+    // 線形連鎖は hand-over-hand により常に 1 フレームで処理される。
+    // max_context_depth 未満の深い連鎖でも末端まで伝播することを確認する。
     const depth = 256;
     var scopes: [depth]OwnedCancelScope = undefined;
 
@@ -578,12 +590,12 @@ test "withCancel: 分岐ツリー全体にcancelが伝播する" {
     try std.testing.expectEqual(@as(?ContextError, error.Canceled), b.context().err(io));
 }
 
-test "withCancel: インラインフレームを超える深い分岐ツリーはフォールバックで伝播する" {
+test "withCancel: 深い左偏分岐ツリー全体にcancelが伝播する" {
     const io = std.testing.io;
 
     // 各 spine[i] が「子 spine[i+1]（分岐）＋末尾 extra[i]」を持つ左偏分岐ツリー。
-    // spine の分岐ネストがインラインフレーム上限(64)を超えると cancelRecursive へ
-    // フォールバックする。その経路でも全ノードへ伝播することを確認する。
+    // この形状は cancelIterative の明示スタックを深く（分岐ネスト分）消費するため、
+    // バッファ境界付近でも全ノードへ伝播することを確認する。
     const depth = 80;
     var spine: [depth]OwnedCancelScope = undefined;
     var extra: [depth]OwnedCancelScope = undefined;
@@ -623,6 +635,35 @@ test "withCancel: インラインフレームを超える深い分岐ツリー�
         @as(?ContextError, error.Canceled),
         extra[depth - 1].context().err(io),
     );
+}
+
+test "withCancel: 深さが上限に達すると ContextDepthExceeded を返す" {
+    const io = std.testing.io;
+
+    var scopes: std.ArrayList(OwnedCancelScope) = .empty;
+    defer {
+        // 深い方（後に作った方）から解放する。
+        var i: usize = scopes.items.len;
+        while (i > 0) {
+            i -= 1;
+            scopes.items[i].deinit(std.testing.allocator, io);
+        }
+        scopes.deinit(std.testing.allocator);
+    }
+
+    // 上限に達するまで派生し続ける。深さ検査は確保前に行われるため、
+    // 失敗した呼び出しはリークしない。
+    var parent = background;
+    while (true) {
+        const scope = withCancel(std.testing.allocator, io, parent) catch |e| {
+            try std.testing.expectEqual(error.ContextDepthExceeded, e);
+            break;
+        };
+        try scopes.append(std.testing.allocator, scope);
+        parent = scope.context();
+    }
+
+    try std.testing.expect(scopes.items.len > 0);
 }
 
 // --- withDeadline ---

@@ -5,14 +5,19 @@ pub const background: Context = .background;
 pub const todo: Context = .todo;
 pub const canceled: Context = .canceled;
 
-// cancelIterative がスタック上に確保する Frame 数。分岐のネスト深さがこれを超えた
-// 場合のみ cancelRecursive へフォールバックする。線形連鎖は hand-over-hand により
-// 常に 1 フレームで処理されるため、この上限に達するのは深い左偏分岐ツリーに限られる。
-const max_inline_frames: usize = 64;
-
-// cancelRecursive の最終防衛ライン。スタックオーバーフローを明示メッセージで先に止める。
-// 到達には max_inline_frames を超える深さの分岐ツリーが必要で、現実的には起こらない。
-const max_fallback_depth: usize = 128;
+// キャンセル可能コンテキスト連鎖の最大深さ。background などの非キャンセルルートを
+// 深さ 0 とし、子は親 + 1。withCancel / withDeadline はこの上限以上になる生成を
+// error.ContextDepthExceeded で拒否する。
+//
+// 深さを上限以下に保証することで、cancelIterative の明示スタックがこのサイズの
+// インラインバッファで決して溢れず、伝播経路から再帰・@panic を排除できる。
+// 値はスタック使用量（max_context_depth × @sizeOf(Frame)）と許容する連鎖深さの
+// トレードオフで決める。現実的なコンテキスト連鎖がこの上限に達することはない。
+//
+// この数値は context.zig 内に閉じ込める。生成時の深さ検査（CancelState.childDepth）も
+// cancelIterative のバッファ確保も同一ファイルにあるため、「バッファは決して溢れない」
+// 不変条件をこのファイルだけで完結して保てる。
+const max_context_depth: usize = 512;
 
 const Signal = signal_mod.Signal;
 const SignalSource = signal_mod.SignalSource;
@@ -114,6 +119,9 @@ pub const CancelState = struct {
     source: SignalSource,
     cancel_err: ?ContextError,
     children: std.ArrayList(CancelChild),
+    // ルート（background など）からのキャンセル木における深さ。子は親 + 1。
+    // withCancel / withDeadline が max_context_depth 未満になるよう生成時に保証する。
+    depth: usize,
 
     pub fn init() CancelState {
         return .{
@@ -121,6 +129,7 @@ pub const CancelState = struct {
             .source = .{},
             .cancel_err = null,
             .children = .empty,
+            .depth = 0,
         };
     }
 
@@ -128,6 +137,15 @@ pub const CancelState = struct {
         if (self.cancel_err == null and self.children.items.len > 0)
             @panic("CancelState.deinit: cancel must be called before deinit when children exist");
         self.children.deinit(allocator);
+    }
+
+    // 親のキャンセル状態から、これに連なる子ノードの深さを返す。
+    // 上限（max_context_depth）に達する場合は ContextDepthExceeded を返す。
+    // 深さを上限未満に保つことで cancelIterative のバッファが溢れないことを保証する。
+    pub fn childDepth(parent_state: ?*CancelState) error{ContextDepthExceeded}!usize {
+        const depth = if (parent_state) |ps| ps.depth + 1 else 0;
+        if (depth >= max_context_depth) return error.ContextDepthExceeded;
+        return depth;
     }
 
     const Visit = enum { already_canceled, leaf, branch };
@@ -179,9 +197,14 @@ pub const CancelState = struct {
     //   2. enter(c) で c 自身のロックを取得した後は、c.deinit が c.cancel（c ロック要求）で
     //      ブロックするため、親ロックを解放しても c は解放されない（self-pinning）。
     // この 2 段階のピン留めにより hand-over-hand で親ロックを早期解放でき、線形連鎖は
-    // 常に 1 フレームで処理される（深さに依存せず panic しない）。
+    // 常に 1 フレームで処理される。
+    //
+    // 明示スタック buf のサイズは max_context_depth。キャンセル木の深さは生成時に
+    // max_context_depth 未満へ保証されており、保持フレーム数は探索パス上の
+    // 「未処理の子を残す祖先」数（≤ サブツリー深さ）に等しいため、buf は決して溢れない。
+    // よって伝播経路に再帰も @panic も存在しない。
     fn cancelIterative(self: *CancelState, io: std.Io, reason: ContextError) void {
-        var buf: [max_inline_frames]Frame = undefined;
+        var buf: [max_context_depth]Frame = undefined;
         var top: usize = 0;
 
         switch (enter(self, io, reason)) {
@@ -205,17 +228,6 @@ pub const CancelState = struct {
             f.index += 1;
             const parent_done = f.index >= children.len;
 
-            // インラインバッファが満杯のときは、この子のサブツリーを再帰でドレインする。
-            // child は f.state のロック（保持中）でピン留めされているため安全。
-            if (top == max_inline_frames) {
-                cancelRecursive(child, io, reason, 0);
-                if (parent_done) {
-                    f.state.mutex.unlock(io);
-                    top -= 1;
-                }
-                continue;
-            }
-
             switch (enter(child, io, reason)) {
                 .already_canceled, .leaf => {
                     if (parent_done) {
@@ -230,29 +242,13 @@ pub const CancelState = struct {
                         f.state.mutex.unlock(io);
                         buf[top - 1] = .{ .state = child, .index = 0 };
                     } else {
+                        // 深さは max_context_depth 未満に保証されているため top はバッファ内に収まる。
+                        std.debug.assert(top < buf.len);
                         buf[top] = .{ .state = child, .index = 0 };
                         top += 1;
                     }
                 },
             }
-        }
-    }
-
-    // インラインバッファを超える深さの分岐ツリーに対するフォールバック。
-    // 元の再帰方式（親ロックを保持したまま子へ伝播）でサブツリーを処理する。
-    // 現実的なコンテキスト連鎖は cancelIterative が O(1) フレームで処理するため、
-    // この経路に到達するのは極端に深い左偏分岐ツリーに限られる。
-    fn cancelRecursive(self: *CancelState, io: std.Io, reason: ContextError, depth: usize) void {
-        if (depth >= max_fallback_depth) @panic("cancel propagation fallback depth exceeded");
-
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        if (self.cancel_err != null) return;
-        self.cancel_err = reason;
-        self.source.fire(io);
-        for (self.children.items) |child| {
-            cancelRecursive(childState(child), io, reason, depth + 1);
         }
     }
 
@@ -999,27 +995,6 @@ test "CancelState.childState: 各バリアントの cancel_state を返す" {
         &deadline_ctx.cancel_state,
         CancelState.childState(.{ .deadline_ctx = &deadline_ctx }),
     );
-}
-
-// --- CancelState.cancelRecursive ---
-
-test "CancelState.cancelRecursive: depth = 0 で cancel と同等に動作する" {
-    const io = std.testing.io;
-
-    var state = CancelState.init();
-    state.cancelRecursive(io, error.Canceled, 0);
-
-    try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
-    try std.testing.expect(state.source.signal().isFired());
-}
-
-test "CancelState.cancelRecursive: depth = max_fallback_depth - 1 で正常に動作する" {
-    const io = std.testing.io;
-
-    var state = CancelState.init();
-    state.cancelRecursive(io, error.Canceled, max_fallback_depth - 1);
-
-    try std.testing.expectEqual(@as(?ContextError, error.Canceled), state.cancel_err);
 }
 
 // --- CancelState.unregister ---
